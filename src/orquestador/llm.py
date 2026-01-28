@@ -10,10 +10,13 @@ from langchain_openai import ChatOpenAI
 try:
     from . import config as app_config
     from .models import OrquestradorDecision
+    from .logging_config import get_logger
 except ImportError:
     import config as app_config
     from models import OrquestradorDecision
+    from logging_config import get_logger
 
+logger = get_logger("llm")
 _llm: Optional[ChatOpenAI] = None
 _structured_llm: Optional[ChatOpenAI] = None
 
@@ -73,7 +76,10 @@ async def invoke_orquestador(system_prompt: str, message: str) -> Tuple[str, Opt
     # Invocar con structured output: retorna OrquestradorDecision
     decision: OrquestradorDecision = await structured_llm.ainvoke(messages)
     
-    print(f"[LLM] Decisión estructurada: action={decision.action}, agent={decision.agent_name}")
+    logger.info(
+        "Decisión estructurada: action=%s, agent=%s",
+        decision.action, decision.agent_name
+    )
     
     # Extraer respuesta y agente
     reply = decision.response

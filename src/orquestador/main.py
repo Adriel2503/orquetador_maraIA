@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 # Permitir ejecución directa con python main.py
@@ -23,20 +24,26 @@ try:
     from . import config as app_config
     from .prompts import build_orquestador_system_prompt_with_memory
     from .llm import invoke_orquestador
-    from .mcp_client import invoke_mcp_agent
+    from .mcp_client import invoke_mcp_agent, get_circuit_breaker_states
     from .memory import memory_manager
+    from .logging_config import get_logger
+    from . import metrics as app_metrics
 except ImportError:
     from models import ChatRequest, ChatResponse
     import config as app_config
     from prompts import build_orquestador_system_prompt_with_memory
     from llm import invoke_orquestador
-    from mcp_client import invoke_mcp_agent
+    from mcp_client import invoke_mcp_agent, get_circuit_breaker_states
     from memory import memory_manager
+    from logging_config import get_logger
+    import metrics as app_metrics
+
+logger = get_logger("main")
 
 app = FastAPI(
     title="MaravIA Orquestador",
     description="Orquestador que enruta conversaciones a agentes especializados MCP (Venta, Cita, Reserva)",
-    version="0.1.0"
+    version=app_config.VERSION
 )
 
 # CORS - ajustar según necesidad
@@ -76,48 +83,43 @@ async def chat(request: ChatRequest):
             detail="El campo 'config.id_empresa' debe ser un número mayor a 0"
         )
     
+    start_time = time.perf_counter()
     try:
-        # Log completo para debugging - muestra todo el JSON recibido
-        print(f"\n{'='*60}")
-        print(f" POST /api/agent/chat - REQUEST RECIBIDO")
-        print(f"{'='*60}")
-        print(f" Mensaje: {request.message}")
-        print(f" Session ID: {request.session_id}")
-        print(f"\n CONFIGURACIÓN DEL BOT:")
-        print(f"   - Nombre: {request.config.nombre_bot}")
-        print(f"   - ID Empresa: {request.config.id_empresa}")
-        print(f"   - Tipo: {request.config.tipo_bot}")
-        print(f"   - Objetivo: {request.config.objetivo_principal}")
-        print(f"   - Rol: {request.config.rol_bot}")
-        print(f"\n MCP (solo Reserva activo):")
-        print(f"   - Reserva URL: {app_config.MCP_RESERVA_URL}")
-        print(f"   - Reserva habilitado: {app_config.MCP_RESERVA_ENABLED}")
-        print(f"\n LLM:")
-        print(f"   - Modelo: {app_config.OPENAI_MODEL}")
-        
-        # Mostrar JSON completo en formato legible
         request_dict = request.model_dump()
-        print(f"\n JSON COMPLETO RECIBIDO:")
-        print(json.dumps(request_dict, indent=2, ensure_ascii=False))
-        print(f"{'='*60}\n")
+        logger.info(
+            "POST /api/agent/chat request",
+            extra={"extra_fields": {
+                "request_message": request.message,
+                "session_id": request.session_id,
+                "nombre_bot": request.config.nombre_bot,
+                "id_empresa": request.config.id_empresa,
+                "mcp_reserva_url": app_config.MCP_RESERVA_URL,
+                "openai_model": app_config.OPENAI_MODEL,
+            }}
+        )
+        logger.debug("Request body: %s", json.dumps(request_dict, ensure_ascii=False))
         
         # 1. CARGAR MEMORIA (historial de conversación)
-        memory = memory_manager.get(request.session_id, limit=10)
-        print(f"[ORQUESTADOR] Memoria cargada: {len(memory)} turnos previos")
+        memory = await memory_manager.get(request.session_id, limit=10)
+        logger.info("Memoria cargada", extra={"extra_fields": {"session_id": request.session_id, "turnos": len(memory)}})
+        current_agent = None
         if memory:
-            current_agent = memory_manager.get_current_agent(request.session_id)
-            print(f"[ORQUESTADOR] Agente activo: {current_agent}")
+            current_agent = await memory_manager.get_current_agent(request.session_id)
+            if current_agent:
+                logger.info("Agente activo en sesión", extra={"extra_fields": {"session_id": request.session_id, "agent": current_agent}})
         
         # 2. System prompt del orquestador CON memoria
         config_dict = request.config.model_dump()
         system_prompt = build_orquestador_system_prompt_with_memory(config_dict, memory)
-        print(f"[ORQUESTADOR] System prompt length: {len(system_prompt)} chars")
+        logger.debug("System prompt length: %s chars", len(system_prompt))
         
         # 3. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (async nativo)
         reply, agent_to_invoke = await invoke_orquestador(system_prompt, request.message)
         
-        print(f"[ORQUESTADOR] Respuesta: {reply[:200]}...")
-        print(f"[ORQUESTADOR] Agente a invocar: {agent_to_invoke}")
+        logger.info(
+            "Orquestador decidió",
+            extra={"extra_fields": {"agent_to_invoke": agent_to_invoke, "reply_preview": reply[:200]}}
+        )
         
         # 4. Si el orquestador detectó que debe delegar, llamar al agente MCP
         final_reply = reply
@@ -125,15 +127,13 @@ async def chat(request: ChatRequest):
         action = "respond"
         
         if agent_to_invoke:
-            print(f"[MCP] Delegando a agente: {agent_to_invoke}")
+            logger.info("Delegando a agente MCP", extra={"extra_fields": {"agent": agent_to_invoke}})
             
-            # Preparar contexto para el agente MCP
             context = {
                 "session_id": request.session_id,
                 "config": request.config.model_dump(),
             }
             
-            # ESPERAR respuesta del agente especializado
             specialist_response = await invoke_mcp_agent(
                 agent_name=agent_to_invoke,
                 message=request.message,
@@ -142,29 +142,32 @@ async def chat(request: ChatRequest):
             )
             
             if specialist_response:
-                print(f"[MCP] Respuesta recibida del agente {agent_to_invoke}")
-                print(f"[MCP] Respuesta final: {specialist_response[:150]}...")
-                
-                # Usar respuesta del agente especializado directamente (ya tiene personalidad)
+                logger.info(
+                    "Respuesta MCP recibida",
+                    extra={"extra_fields": {"agent": agent_to_invoke, "response_preview": specialist_response[:150]}}
+                )
                 final_reply = specialist_response
                 agent_used = agent_to_invoke
                 action = "delegate"
             else:
-                print(f"[MCP] Error al invocar agente {agent_to_invoke}, usando respuesta del orquestador")
-                # Si falla MCP, usar la respuesta del orquestador
+                logger.warning(
+                    "Error al invocar agente MCP, usando respuesta orquestador",
+                    extra={"extra_fields": {"agent": agent_to_invoke}}
+                )
                 final_reply = reply
                 action = "respond"
         
         # 5. GUARDAR EN MEMORIA
-        memory_manager.add(
+        await memory_manager.add(
             session_id=request.session_id,
             user_message=request.message,
             agent_used=agent_used,
             response=final_reply
         )
         
-        print(f"[ORQUESTADOR] Respuesta final: {final_reply[:200]}...")
+        logger.info("Respuesta final", extra={"extra_fields": {"session_id": request.session_id, "action": action, "reply_preview": final_reply[:200]}})
         
+        app_metrics.record_request(time.perf_counter() - start_time, action, error=False)
         return ChatResponse(
             reply=final_reply,
             session_id=request.session_id,
@@ -173,13 +176,14 @@ async def chat(request: ChatRequest):
         )
     
     except ValueError as e:
-        print(f"Config/LLM error: {e}")
+        logger.error("Config/LLM error: %s", e)
+        app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
-        # Re-lanzar HTTPException (incluye las de validación)
         raise
     except Exception as e:
-        print(f"Error procesando request: {str(e)}")
+        logger.exception("Error procesando request: %s", e)
+        app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -204,14 +208,20 @@ async def config():
 @app.get("/memory/stats")
 async def memory_stats():
     """Estadísticas de memoria (debug)"""
-    return memory_manager.get_stats()
+    return await memory_manager.get_stats()
 
 
 @app.post("/memory/clear/{session_id}")
 async def clear_memory(session_id: str):
     """Limpia la memoria de una sesión específica"""
-    memory_manager.clear(session_id)
+    await memory_manager.clear(session_id)
     return {"message": f"Memoria limpiada para session_id: {session_id}"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """Métricas in-memory: requests, errores, latencia, estado circuit breakers (JSON)."""
+    return app_metrics.get_metrics_with_circuit_breakers(get_circuit_breaker_states())
 
 
 @app.get("/")
@@ -219,7 +229,7 @@ async def root():
     """Root endpoint - Información del servicio"""
     return {
         "service": "MaravIA Orquestador",
-        "version": "0.2.0",
+        "version": app_config.VERSION,
         "status": "running",
         "features": [
             "Detección de intención con structured output",
@@ -230,6 +240,7 @@ async def root():
             "chat": "/api/agent/chat",
             "config": "/config",
             "health": "/health",
+            "metrics": "/metrics",
             "memory_stats": "/memory/stats",
             "clear_memory": "/memory/clear/{session_id}",
             "docs": "/docs",

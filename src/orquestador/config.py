@@ -11,6 +11,9 @@ from dotenv import load_dotenv
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_BASE_DIR / ".env")
 
+# Versión del servicio (única fuente de verdad)
+VERSION = "0.2.0"
+
 # URLs de servidores MCP (Venta, Cita, Reserva)
 MCP_RESERVA_URL = os.getenv("MCP_RESERVA_URL", "http://localhost:8003/mcp")
 MCP_CITA_URL = os.getenv("MCP_CITA_URL", "http://localhost:8002/mcp")
