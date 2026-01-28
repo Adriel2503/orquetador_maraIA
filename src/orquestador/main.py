@@ -57,6 +57,25 @@ async def chat(request: ChatRequest):
     Construye el system prompt (identidad, reglas), invoca el agente orquestador
     (OpenAI gpt-4o-mini / gpt-4o) y devuelve la respuesta.
     """
+    # Validación de inputs
+    if not request.message or not request.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="El campo 'message' no puede estar vacío"
+        )
+    
+    if not request.session_id or not request.session_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="El campo 'session_id' no puede estar vacío"
+        )
+    
+    if not request.config.id_empresa or request.config.id_empresa <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="El campo 'config.id_empresa' debe ser un número mayor a 0"
+        )
+    
     try:
         # Log completo para debugging - muestra todo el JSON recibido
         print(f"\n{'='*60}")
@@ -94,8 +113,8 @@ async def chat(request: ChatRequest):
         system_prompt = build_orquestador_system_prompt_with_memory(config_dict, memory)
         print(f"[ORQUESTADOR] System prompt length: {len(system_prompt)} chars")
         
-        # 3. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (en thread para no bloquear)
-        reply, agent_to_invoke = await asyncio.to_thread(invoke_orquestador, system_prompt, request.message)
+        # 3. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (async nativo)
+        reply, agent_to_invoke = await invoke_orquestador(system_prompt, request.message)
         
         print(f"[ORQUESTADOR] Respuesta: {reply[:200]}...")
         print(f"[ORQUESTADOR] Agente a invocar: {agent_to_invoke}")
@@ -156,6 +175,9 @@ async def chat(request: ChatRequest):
     except ValueError as e:
         print(f"Config/LLM error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        # Re-lanzar HTTPException (incluye las de validación)
+        raise
     except Exception as e:
         print(f"Error procesando request: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

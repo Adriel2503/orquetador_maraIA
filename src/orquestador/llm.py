@@ -32,6 +32,7 @@ def _get_llm() -> ChatOpenAI:
             model=app_config.OPENAI_MODEL,
             temperature=0.4,
             max_tokens=4096,
+            timeout=app_config.OPENAI_TIMEOUT,
         )
     return _llm
 
@@ -48,7 +49,7 @@ def _get_structured_llm() -> ChatOpenAI:
     return _structured_llm
 
 
-def invoke_orquestador(system_prompt: str, message: str) -> Tuple[str, Optional[str]]:
+async def invoke_orquestador(system_prompt: str, message: str) -> Tuple[str, Optional[str]]:
     """
     Invoca el agente orquestador (OpenAI) con system prompt y mensaje del usuario.
     Usa structured output para obtener decisión estructurada (delegar o responder).
@@ -70,7 +71,7 @@ def invoke_orquestador(system_prompt: str, message: str) -> Tuple[str, Optional[
     ]
     
     # Invocar con structured output: retorna OrquestradorDecision
-    decision: OrquestradorDecision = structured_llm.invoke(messages)
+    decision: OrquestradorDecision = await structured_llm.ainvoke(messages)
     
     print(f"[LLM] Decisión estructurada: action={decision.action}, agent={decision.agent_name}")
     

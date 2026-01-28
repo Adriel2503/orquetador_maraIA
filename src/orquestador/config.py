@@ -22,3 +22,10 @@ MCP_RESERVA_ENABLED = os.getenv("MCP_RESERVA_ENABLED", "true").lower() in ("1", 
 # OpenAI (agente orquestador)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "60"))
+
+# MCP (agentes especializados)
+MCP_TIMEOUT = int(os.getenv("MCP_TIMEOUT", "30"))
+MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
+MCP_CIRCUIT_BREAKER_RESET_TIMEOUT = int(os.getenv("MCP_CIRCUIT_BREAKER_RESET_TIMEOUT", "60"))
+MCP_MAX_RETRIES = int(os.getenv("MCP_MAX_RETRIES", "3"))
