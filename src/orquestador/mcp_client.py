@@ -80,26 +80,29 @@ class CircuitBreaker:
         return self.state.value
 
 
-# Circuit breakers por agente
+# Circuit breakers por agente (protegidos con lock para concurrencia async)
 _circuit_breakers: Dict[str, CircuitBreaker] = {}
+_circuit_breakers_lock = asyncio.Lock()
 
 
-def _get_circuit_breaker(agent_name: str) -> CircuitBreaker:
-    """Obtiene o crea el circuit breaker para un agente"""
-    if agent_name not in _circuit_breakers:
-        _circuit_breakers[agent_name] = CircuitBreaker(
-            failure_threshold=app_config.MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
-            reset_timeout=app_config.MCP_CIRCUIT_BREAKER_RESET_TIMEOUT
-        )
-    return _circuit_breakers[agent_name]
+async def _get_circuit_breaker(agent_name: str) -> CircuitBreaker:
+    """Obtiene o crea el circuit breaker para un agente. Thread-safe para concurrencia async."""
+    async with _circuit_breakers_lock:
+        if agent_name not in _circuit_breakers:
+            _circuit_breakers[agent_name] = CircuitBreaker(
+                failure_threshold=app_config.MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+                reset_timeout=app_config.MCP_CIRCUIT_BREAKER_RESET_TIMEOUT
+            )
+        return _circuit_breakers[agent_name]
 
 
-def get_circuit_breaker_states() -> Dict[str, Dict[str, Any]]:
-    """Devuelve el estado de todos los circuit breakers (para /metrics)."""
-    return {
-        name: {"state": cb.get_state(), "failure_count": cb.failure_count}
-        for name, cb in _circuit_breakers.items()
-    }
+async def get_circuit_breaker_states() -> Dict[str, Dict[str, Any]]:
+    """Devuelve el estado de todos los circuit breakers (para /metrics). Lectura bajo lock."""
+    async with _circuit_breakers_lock:
+        return {
+            name: {"state": cb.get_state(), "failure_count": cb.failure_count}
+            for name, cb in _circuit_breakers.items()
+        }
 
 
 def _get_mcp_client() -> Optional[MultiServerMCPClient]:
@@ -211,7 +214,7 @@ async def invoke_mcp_agent(agent_name: str, message: str, session_id: str, conte
     Returns:
         Respuesta del agente MCP o None si hay error
     """
-    circuit_breaker = _get_circuit_breaker(agent_name)
+    circuit_breaker = await _get_circuit_breaker(agent_name)
     
     # Verificar circuit breaker
     if not circuit_breaker.can_attempt():

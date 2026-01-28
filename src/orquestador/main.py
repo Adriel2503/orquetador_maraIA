@@ -221,7 +221,8 @@ async def clear_memory(session_id: str):
 @app.get("/metrics")
 async def metrics():
     """Métricas in-memory: requests, errores, latencia, estado circuit breakers (JSON)."""
-    return app_metrics.get_metrics_with_circuit_breakers(get_circuit_breaker_states())
+    cb_states = await get_circuit_breaker_states()
+    return app_metrics.get_metrics_with_circuit_breakers(cb_states)
 
 
 @app.get("/")

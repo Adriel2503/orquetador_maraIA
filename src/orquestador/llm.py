@@ -1,7 +1,9 @@
 """
 Cliente LLM del orquestador (OpenAI). Carga y usa el agente orquestador.
+Inicialización lazy protegida con asyncio.Lock para concurrencia segura.
 """
 
+import asyncio
 from typing import Optional, Tuple
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -19,17 +21,16 @@ except ImportError:
 logger = get_logger("llm")
 _llm: Optional[ChatOpenAI] = None
 _structured_llm: Optional[ChatOpenAI] = None
+_llm_lock = asyncio.Lock()
 
 
-def _get_llm() -> ChatOpenAI:
-    """Lazy init del LLM (OpenAI) estándar."""
+def _create_llm_if_needed() -> None:
+    """Crea _llm si no existe. Llamar solo desde dentro de _llm_lock."""
     global _llm
     if _llm is None:
         key = app_config.OPENAI_API_KEY
         if not key:
-            raise ValueError(
-                "OPENAI_API_KEY no configurada"
-            )
+            raise ValueError("OPENAI_API_KEY no configurada")
         _llm = ChatOpenAI(
             api_key=key,
             model=app_config.OPENAI_MODEL,
@@ -37,18 +38,19 @@ def _get_llm() -> ChatOpenAI:
             max_tokens=4096,
             timeout=app_config.OPENAI_TIMEOUT,
         )
-    return _llm
 
 
-def _get_structured_llm() -> ChatOpenAI:
+async def _get_structured_llm() -> ChatOpenAI:
     """
     Lazy init del LLM con structured output.
     Usa .with_structured_output() para retornar JSON según el schema OrquestradorDecision.
+    Protegido con lock para evitar race en init concurrente.
     """
     global _structured_llm
-    if _structured_llm is None:
-        llm = _get_llm()
-        _structured_llm = llm.with_structured_output(OrquestradorDecision)
+    async with _llm_lock:
+        if _structured_llm is None:
+            _create_llm_if_needed()
+            _structured_llm = _llm.with_structured_output(OrquestradorDecision)
     return _structured_llm
 
 
@@ -66,7 +68,7 @@ async def invoke_orquestador(system_prompt: str, message: str) -> Tuple[str, Opt
         - respuesta: Respuesta del orquestador (texto)
         - agente_a_invocar: "venta", "cita", "reserva" o None si responde directamente
     """
-    structured_llm = _get_structured_llm()
+    structured_llm = await _get_structured_llm()
     
     messages = [
         SystemMessage(content=system_prompt),
