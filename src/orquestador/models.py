@@ -28,17 +28,34 @@ class ChatConfig(BaseModel):
     slots: Optional[int] = None
     agendar_usuario: Optional[bool] = None
     agendar_sucursal: Optional[bool] = None
-    
+    id_prospecto: Optional[int] = None
+
     @field_validator('agendar_usuario', 'agendar_sucursal', mode='before')
     @classmethod
-    def convert_null_string(cls, v):
+    def convert_agendar_to_bool(cls, v):
         """
-        Convierte el string 'null' a None para compatibilidad con n8n.
-        n8n a veces envía "null" como string cuando el valor está vacío.
+        Convierte 1/0 o "1"/"0" a bool; "null"/"" a None.
+        n8n envía valores numéricos 1 y 0 para agendar_usuario y agendar_sucursal.
         """
-        if v == "null" or v == "":
+        if v is None or v == "null" or v == "":
             return None
+        if v in (1, "1", True):
+            return True
+        if v in (0, "0", False):
+            return False
         return v
+
+    @field_validator('id_prospecto', mode='before')
+    @classmethod
+    def coerce_id_prospecto(cls, v):
+        """id_prospecto es siempre entero; acepta int o string numérico."""
+        if v is None or v == "" or v == "null":
+            return None
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+        return None
 
 
 class ChatRequest(BaseModel):
