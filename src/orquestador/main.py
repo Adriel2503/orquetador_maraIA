@@ -1,9 +1,12 @@
 """FastAPI app principal del orquestador"""
 
 import asyncio
+import json as _json_mod
 import sys
 import time
+import urllib.request
 from pathlib import Path
+from typing import Optional
 
 # Permitir ejecución directa con python main.py
 # Si se ejecuta directamente (no como módulo), ajustar el path
@@ -39,6 +42,27 @@ except ImportError:
     import metrics as app_metrics
 
 logger = get_logger("main")
+
+
+def _fetch_contexto_negocio_sync(id_empresa: int) -> Optional[str]:
+    """Llama al endpoint para obtener contexto de negocio (sync, para ejecutar en thread)."""
+    url = app_config.CONTEXTO_NEGOCIO_ENDPOINT
+    body = _json_mod.dumps({"codOpe": "OBTENER_CONTEXTO_NEGOCIO", "id_empresa": id_empresa}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=app_config.CONTEXTO_NEGOCIO_TIMEOUT) as resp:
+            data = _json_mod.loads(resp.read().decode())
+            if data.get("success") and data.get("contexto_negocio"):
+                return data["contexto_negocio"]
+    except Exception as e:
+        logger.debug("No se pudo obtener contexto de negocio: %s", e)
+    return None
+
 
 app = FastAPI(
     title="MaravIA Orquestador",
@@ -108,12 +132,21 @@ async def chat(request: ChatRequest):
             if current_agent:
                 logger.info("Agente activo en sesión", extra={"extra_fields": {"session_id": request.session_id, "agent": current_agent}})
         
-        # 2. System prompt del orquestador CON memoria
+        # 2. Obtener contexto de negocio (para responder preguntas básicas sin delegar)
+        contexto_negocio = await asyncio.to_thread(
+            _fetch_contexto_negocio_sync, request.config.id_empresa
+        )
+        if contexto_negocio:
+            logger.debug("Contexto de negocio cargado para id_empresa=%s", request.config.id_empresa)
+
+        # 3. System prompt del orquestador CON memoria y contexto de negocio
         config_dict = request.config.model_dump()
-        system_prompt = build_orquestador_system_prompt_with_memory(config_dict, memory)
+        system_prompt = build_orquestador_system_prompt_with_memory(
+            config_dict, memory, contexto_negocio=contexto_negocio
+        )
         logger.debug("System prompt length: %s chars", len(system_prompt))
         
-        # 3. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (async nativo)
+        # 4. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (async nativo)
         reply, agent_to_invoke = await invoke_orquestador(system_prompt, request.message)
         
         logger.info(
@@ -121,7 +154,7 @@ async def chat(request: ChatRequest):
             extra={"extra_fields": {"agent_to_invoke": agent_to_invoke, "reply_preview": reply[:200]}}
         )
         
-        # 4. Si el orquestador detectó que debe delegar, llamar al agente MCP
+        # 5. Si el orquestador detectó que debe delegar, llamar al agente MCP
         final_reply = reply
         agent_used = None
         action = "respond"
@@ -157,7 +190,7 @@ async def chat(request: ChatRequest):
                 final_reply = reply
                 action = "respond"
         
-        # 5. GUARDAR EN MEMORIA
+        # 6. GUARDAR EN MEMORIA
         await memory_manager.add(
             session_id=request.session_id,
             user_message=request.message,

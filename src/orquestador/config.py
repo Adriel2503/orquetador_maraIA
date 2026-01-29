@@ -22,6 +22,13 @@ MCP_VENTA_URL = os.getenv("MCP_VENTA_URL", "http://localhost:8001/mcp")
 # Opcional: activar/desactivar llamadas a MCP Reserva sin cambiar código
 MCP_RESERVA_ENABLED = os.getenv("MCP_RESERVA_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# Endpoint para contexto de negocio (obtener información breve para el orquestador)
+CONTEXTO_NEGOCIO_ENDPOINT = os.getenv(
+    "CONTEXTO_NEGOCIO_ENDPOINT",
+    "https://api.maravia.pe/servicio/ws_informacion_ia.php",
+)
+CONTEXTO_NEGOCIO_TIMEOUT = int(os.getenv("CONTEXTO_NEGOCIO_TIMEOUT", "10"))
+
 # OpenAI (agente orquestador)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

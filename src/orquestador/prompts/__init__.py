@@ -50,7 +50,8 @@ def build_orquestador_system_prompt(config: Dict[str, Any]) -> str:
 
 def build_orquestador_system_prompt_with_memory(
     config: Dict[str, Any],
-    memory: List[Dict]
+    memory: List[Dict],
+    contexto_negocio: Optional[str] = None,
 ) -> str:
     """
     Construye el system prompt del orquestador incluyendo historial de conversación.
@@ -58,13 +59,15 @@ def build_orquestador_system_prompt_with_memory(
     Args:
         config: Diccionario con nombre_bot, modalidad, frases, etc.
         memory: Lista de turnos previos [{"user": "...", "agent": "...", "response": "..."}]
+        contexto_negocio: Información breve del negocio (~100 palabras) para responder preguntas básicas sin delegar.
 
     Returns:
         System prompt formateado con contexto de memoria.
     """
     # Variables base del template
     variables = _apply_defaults(config)
-    
+    variables["contexto_negocio"] = (contexto_negocio or "").strip() or None
+
     # Detectar agente activo
     current_agent = None
     if memory:
