@@ -3,10 +3,11 @@ Cliente MCP para consumir agentes especializados (Venta, Cita, Reserva).
 Incluye circuit breaker y retry con backoff exponencial.
 """
 
+import ast
 import asyncio
 import time
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Any, Dict, List, Optional, Union
 
 try:
     from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -136,6 +137,53 @@ def _get_mcp_client() -> Optional[MultiServerMCPClient]:
     return _mcp_client
 
 
+def _extract_plain_text_from_agent_result(result: Any) -> str:
+    """
+    Extrae texto plano del resultado del agente MCP.
+    El adaptador puede devolver: str, lista de bloques [{"type": "text", "text": "..."}],
+    o un objeto con .content. Normalizamos siempre a un string para reply.
+    """
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        s = result.strip()
+        # Si el adaptador devolvió la lista ya stringificada, intentar extraer texto
+        if s.startswith("[") and ("'text'" in s or '"text"' in s):
+            try:
+                parsed = ast.literal_eval(s)
+                if isinstance(parsed, list):
+                    return _extract_plain_text_from_agent_result(parsed) or s
+            except (ValueError, SyntaxError):
+                pass
+        return s
+    if isinstance(result, list):
+        parts: List[str] = []
+        for item in result:
+            if isinstance(item, dict):
+                if "text" in item and item["text"]:
+                    parts.append(str(item["text"]).strip())
+                elif "content" in item and item["content"]:
+                    parts.append(str(item["content"]).strip())
+            elif hasattr(item, "text"):
+                parts.append(str(getattr(item, "text", "")).strip())
+            elif hasattr(item, "content"):
+                parts.append(str(getattr(item, "content", "")).strip())
+        if parts:
+            return "\n".join(p for p in parts if p)
+    if isinstance(result, dict):
+        if "text" in result and result["text"]:
+            return str(result["text"]).strip()
+        if "content" in result and result["content"]:
+            return str(result["content"]).strip()
+    if hasattr(result, "content"):
+        content = getattr(result, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            return _extract_plain_text_from_agent_result(content)
+    return str(result).strip()
+
+
 async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: str, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Invocación interna del agente MCP sin circuit breaker ni retry.
@@ -194,7 +242,8 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
                 }),
                 timeout=app_config.MCP_TIMEOUT
             )
-        return str(result)
+        text = _extract_plain_text_from_agent_result(result)
+        return text if text else None
     
     tools_info = ", ".join([tool.name for tool in tools[:5]])
     logger.warning("No se encontró tool 'chat'. Tools disponibles: %s", tools_info)
