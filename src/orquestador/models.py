@@ -28,7 +28,6 @@ class ChatConfig(BaseModel):
     slots: Optional[int] = None
     agendar_usuario: Optional[bool] = None
     agendar_sucursal: Optional[bool] = None
-    id_prospecto: Optional[int] = None
 
     @field_validator('agendar_usuario', 'agendar_sucursal', mode='before')
     @classmethod
@@ -45,23 +44,11 @@ class ChatConfig(BaseModel):
             return False
         return v
 
-    @field_validator('id_prospecto', mode='before')
-    @classmethod
-    def coerce_id_prospecto(cls, v):
-        """id_prospecto es siempre entero; acepta int o string numérico."""
-        if v is None or v == "" or v == "null":
-            return None
-        if isinstance(v, int):
-            return v
-        if isinstance(v, str) and v.isdigit():
-            return int(v)
-        return None
-
 
 class ChatRequest(BaseModel):
     """Request que recibe el orquestador desde n8n"""
     message: str
-    session_id: str  # id_prospecto
+    session_id: str  # identificador de conversación/persona
     config: ChatConfig
 
 
