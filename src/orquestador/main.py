@@ -95,10 +95,10 @@ async def chat(request: ChatRequest):
             detail="El campo 'message' no puede estar vacío"
         )
     
-    if not request.session_id or not request.session_id.strip():
+    if request.session_id is None or request.session_id < 0:
         raise HTTPException(
             status_code=400,
-            detail="El campo 'session_id' no puede estar vacío"
+            detail="El campo 'session_id' debe ser un entero no negativo"
         )
     
     if not request.config.id_empresa or request.config.id_empresa <= 0:
@@ -246,9 +246,13 @@ async def memory_stats():
 
 @app.post("/memory/clear/{session_id}")
 async def clear_memory(session_id: str):
-    """Limpia la memoria de una sesión específica"""
-    await memory_manager.clear(session_id)
-    return {"message": f"Memoria limpiada para session_id: {session_id}"}
+    """Limpia la memoria de una sesión específica. session_id en URL viene como str; se convierte a int."""
+    try:
+        sid = int(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="session_id debe ser un número entero")
+    await memory_manager.clear(sid)
+    return {"message": f"Memoria limpiada para session_id: {sid}"}
 
 
 @app.get("/metrics")

@@ -11,7 +11,8 @@ from datetime import datetime
 
 # Storage en memoria (dict simple - para MVP)
 # Protegido con asyncio.Lock para sincronización entre corutinas
-_MEMORY_STORE: Dict[str, List[Dict]] = {}
+# Clave: session_id (int, unificado con n8n)
+_MEMORY_STORE: Dict[int, List[Dict]] = {}
 _memory_lock = asyncio.Lock()
 
 
@@ -24,7 +25,7 @@ class MemoryManager:
     
     @staticmethod
     async def add(
-        session_id: str,
+        session_id: int,
         user_message: str,
         agent_used: Optional[str],
         response: str
@@ -33,7 +34,7 @@ class MemoryManager:
         Agrega un turno a la memoria.
         
         Args:
-            session_id: ID de la sesión/usuario
+            session_id: ID de la sesión/usuario (int, unificado con n8n)
             user_message: Mensaje del usuario
             agent_used: Agente que manejó el mensaje ("reserva" | "venta" | "cita" | None)
             response: Respuesta final al usuario (ya mejorada)
@@ -53,12 +54,12 @@ class MemoryManager:
             _MEMORY_STORE[session_id] = _MEMORY_STORE[session_id][-10:]
     
     @staticmethod
-    async def get(session_id: str, limit: int = 10) -> List[Dict]:
+    async def get(session_id: int, limit: int = 10) -> List[Dict]:
         """
         Obtiene los últimos N turnos de una sesión.
         
         Args:
-            session_id: ID de la sesión/usuario
+            session_id: ID de la sesión/usuario (int)
             limit: Cantidad máxima de turnos a retornar
         
         Returns:
@@ -69,12 +70,12 @@ class MemoryManager:
             return history[-limit:]
     
     @staticmethod
-    async def get_current_agent(session_id: str) -> Optional[str]:
+    async def get_current_agent(session_id: int) -> Optional[str]:
         """
         Obtiene el agente actualmente activo en la conversación.
         
         Args:
-            session_id: ID de la sesión/usuario
+            session_id: ID de la sesión/usuario (int)
         
         Returns:
             Nombre del agente activo o None
@@ -91,12 +92,12 @@ class MemoryManager:
             return None
     
     @staticmethod
-    async def clear(session_id: str) -> None:
+    async def clear(session_id: int) -> None:
         """
         Limpia la memoria de una sesión.
         
         Args:
-            session_id: ID de la sesión/usuario
+            session_id: ID de la sesión/usuario (int)
         """
         async with _memory_lock:
             if session_id in _MEMORY_STORE:

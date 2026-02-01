@@ -28,6 +28,9 @@ class ChatConfig(BaseModel):
     slots: Optional[int] = None
     agendar_usuario: Optional[bool] = None
     agendar_sucursal: Optional[bool] = None
+    # Para citas (enviados por n8n, reenviados a agentes)
+    id_usuario: Optional[int] = None
+    correo_usuario: Optional[str] = None
 
     @field_validator('agendar_usuario', 'agendar_sucursal', mode='before')
     @classmethod
@@ -48,14 +51,14 @@ class ChatConfig(BaseModel):
 class ChatRequest(BaseModel):
     """Request que recibe el orquestador desde n8n"""
     message: str
-    session_id: str  # identificador de conversación/persona
+    session_id: int  # identificador de conversación/persona (n8n envía int)
     config: ChatConfig
 
 
 class ChatResponse(BaseModel):
     """Response que devuelve el orquestador a n8n"""
     reply: str
-    session_id: str
+    session_id: int
     agent_used: Optional[str] = None  # "venta" | "cita" | "reserva" | null si respondió el orquestador
     action: Optional[str] = None      # "schedule" | "info" | "clarify" | "escalate" | "none"
 

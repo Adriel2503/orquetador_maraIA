@@ -184,7 +184,7 @@ def _extract_plain_text_from_agent_result(result: Any) -> str:
     return str(result).strip()
 
 
-async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: str, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
+async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: int, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Invocación interna del agente MCP sin circuit breaker ni retry.
     """
@@ -250,14 +250,14 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
     return f"[MCP {agent_name}] Agente disponible pero sin tool 'chat'. Tools: {tools_info}"
 
 
-async def invoke_mcp_agent(agent_name: str, message: str, session_id: str, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
+async def invoke_mcp_agent(agent_name: str, message: str, session_id: int, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Invoca un agente MCP especializado con circuit breaker y retry con backoff exponencial.
     
     Args:
         agent_name: Nombre del agente ("venta", "cita", "reserva")
         message: Mensaje del cliente
-        session_id: ID de sesión para contexto
+        session_id: ID de sesión para contexto (int, unificado con n8n)
         context: Contexto adicional (config del bot, etc.)
     
     Returns:
