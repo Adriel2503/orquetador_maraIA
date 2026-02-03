@@ -22,6 +22,9 @@ MCP_VENTA_URL = os.getenv("MCP_VENTA_URL", "http://localhost:8001/mcp")
 # Opcional: activar/desactivar llamadas a MCP Reserva sin cambiar código
 MCP_RESERVA_ENABLED = os.getenv("MCP_RESERVA_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# Opcional: activar/desactivar llamadas a MCP Cita sin cambiar código
+MCP_CITA_ENABLED = os.getenv("MCP_CITA_ENABLED", "true").lower() in ("1", "true", "yes")
+
 # Endpoint para contexto de negocio (obtener información breve para el orquestador)
 CONTEXTO_NEGOCIO_ENDPOINT = os.getenv(
     "CONTEXTO_NEGOCIO_ENDPOINT",

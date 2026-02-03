@@ -123,6 +123,12 @@ def _get_mcp_client() -> Optional[MultiServerMCPClient]:
                 "url": app_config.MCP_RESERVA_URL
             }
         
+        if app_config.MCP_CITA_ENABLED and app_config.MCP_CITA_URL:
+            servers["cita"] = {
+                "transport": "http",
+                "url": app_config.MCP_CITA_URL
+            }
+        
         if not servers:
             logger.warning("No hay servidores MCP configurados")
             return None
@@ -196,8 +202,15 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
         logger.warning("Agente desconocido: %s", agent_name)
         return None
     
-    if agent_name != "reserva":
-        logger.info("Agente %s no disponible aún. Solo Reserva está activo.", agent_name)
+    # Solo invocar si el agente está configurado (reserva o cita)
+    if agent_name == "reserva" and not (app_config.MCP_RESERVA_ENABLED and app_config.MCP_RESERVA_URL):
+        logger.info("Agente reserva no configurado o deshabilitado.")
+        return None
+    if agent_name == "cita" and not (app_config.MCP_CITA_ENABLED and app_config.MCP_CITA_URL):
+        logger.info("Agente cita no configurado o deshabilitado.")
+        return None
+    if agent_name == "venta":
+        logger.info("Agente venta no disponible aún.")
         return None
     
     logger.debug("Cargando tools del agente %s...", agent_name)
