@@ -18,11 +18,11 @@ except ImportError:
     MCP_AVAILABLE = False
 
 try:
-    from . import config as app_config
-    from .logging_config import get_logger
+    from ..config import config as app_config
+    from ..infrastructure.logging_config import get_logger
 except ImportError:
-    import config as app_config
-    from logging_config import get_logger
+    from orquestador.config import config as app_config
+    from orquestador.infrastructure.logging_config import get_logger
 
 logger = get_logger("mcp_client")
 _mcp_client: Optional[MultiServerMCPClient] = None

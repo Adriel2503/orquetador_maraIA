@@ -7,8 +7,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# .env en la raíz del proyecto orquestador
-_BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# .env en la raíz del proyecto orquestador (orquestador/.env)
+_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 load_dotenv(_BASE_DIR / ".env")
 
 # Versión del servicio (única fuente de verdad)

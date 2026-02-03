@@ -10,13 +10,13 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 try:
-    from . import config as app_config
-    from .models import OrquestradorDecision
-    from .logging_config import get_logger
+    from ..config import config as app_config
+    from ..config.models import OrquestradorDecision
+    from ..infrastructure.logging_config import get_logger
 except ImportError:
-    import config as app_config
-    from models import OrquestradorDecision
-    from logging_config import get_logger
+    from orquestador.config import config as app_config
+    from orquestador.config.models import OrquestradorDecision
+    from orquestador.infrastructure.logging_config import get_logger
 
 logger = get_logger("llm")
 _llm: Optional[ChatOpenAI] = None

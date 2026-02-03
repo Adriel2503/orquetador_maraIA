@@ -98,7 +98,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # 4. Ejecutar
-python src/orquestador/main.py
+python -m src.orquestador.api.main
 ```
 
 El servidor estara disponible en `http://localhost:8000`
@@ -107,10 +107,10 @@ El servidor estara disponible en `http://localhost:8000`
 
 ```bash
 # Desarrollo (con reload)
-uvicorn src.orquestador.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn src.orquestador.api.main:app --reload --host 0.0.0.0 --port 8000
 
 # Produccion (sin reload, multiples workers)
-uvicorn src.orquestador.main:app --host 0.0.0.0 --port 8000 --workers 4
+uvicorn src.orquestador.api.main:app --host 0.0.0.0 --port 8000 --workers 4
 ```
 
 ---
@@ -192,7 +192,7 @@ COPY src ./src
 
 EXPOSE 8000
 
-CMD ["uvicorn", "src.orquestador.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.orquestador.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ### compose.yaml
@@ -345,7 +345,7 @@ WorkingDirectory=/opt/maravia/orquestador
 Environment="PATH=/opt/maravia/orquestador/venv/bin"
 EnvironmentFile=/opt/maravia/orquestador/.env
 ExecStart=/opt/maravia/orquestador/venv/bin/uvicorn \
-    src.orquestador.main:app \
+    src.orquestador.api.main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers 4
@@ -710,7 +710,7 @@ services:
 ### Vertical (Mas Workers)
 
 ```bash
-uvicorn src.orquestador.main:app --workers 4
+uvicorn src.orquestador.api.main:app --workers 4
 ```
 
 **Recomendacion:** workers = (2 * CPU cores) + 1

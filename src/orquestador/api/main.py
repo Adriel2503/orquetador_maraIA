@@ -23,23 +23,23 @@ import json
 
 # Importación que funciona tanto como módulo como script directo
 try:
-    from .models import ChatRequest, ChatResponse
-    from . import config as app_config
-    from .prompts import build_orquestador_system_prompt_with_memory
-    from .llm import invoke_orquestador
-    from .mcp_client import invoke_mcp_agent, get_circuit_breaker_states
-    from .memory import memory_manager
-    from .logging_config import get_logger
-    from . import metrics as app_metrics
+    from ..config.models import ChatRequest, ChatResponse
+    from ..config import config as app_config
+    from ..prompts import build_orquestador_system_prompt_with_memory
+    from ..integrations.llm import invoke_orquestador
+    from ..integrations.mcp_client import invoke_mcp_agent, get_circuit_breaker_states
+    from ..services.memory import memory_manager
+    from ..infrastructure.logging_config import get_logger
+    from ..infrastructure import metrics as app_metrics
 except ImportError:
-    from models import ChatRequest, ChatResponse
-    import config as app_config
-    from prompts import build_orquestador_system_prompt_with_memory
-    from llm import invoke_orquestador
-    from mcp_client import invoke_mcp_agent, get_circuit_breaker_states
-    from memory import memory_manager
-    from logging_config import get_logger
-    import metrics as app_metrics
+    from orquestador.config.models import ChatRequest, ChatResponse
+    from orquestador.config import config as app_config
+    from orquestador.prompts import build_orquestador_system_prompt_with_memory
+    from orquestador.integrations.llm import invoke_orquestador
+    from orquestador.integrations.mcp_client import invoke_mcp_agent, get_circuit_breaker_states
+    from orquestador.services.memory import memory_manager
+    from orquestador.infrastructure.logging_config import get_logger
+    from orquestador.infrastructure import metrics as app_metrics
 
 logger = get_logger("main")
 
@@ -290,23 +290,10 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    
-    # Si se ejecuta directamente, usar string de importación para que reload funcione
-    # Si se ejecuta como módulo, usar la ruta del módulo completa
-    if Path(__file__).parent.name == "orquestador" and Path(__file__).parent.parent.name == "src":
-        # Ejecutado directamente desde src/orquestador/
-        # Usar "main:app" porque ya agregamos el directorio al sys.path
-        uvicorn.run(
-            "main:app",
-            host="0.0.0.0",
-            port=8000,
-            reload=True
-        )
-    else:
-        # Ejecutado como módulo desde la raíz
-        uvicorn.run(
-            "src.orquestador.main:app",
-            host="0.0.0.0",
-            port=8000,
-            reload=True
-        )
+
+    uvicorn.run(
+        "src.orquestador.api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True
+    )

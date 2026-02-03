@@ -57,10 +57,10 @@ cp .env.example .env
 
 ```bash
 # Opcion 1: Directamente
-python src/orquestador/main.py
+python -m src.orquestador.api.main
 
 # Opcion 2: Con uvicorn
-uvicorn src.orquestador.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn src.orquestador.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Ejecucion con Docker
@@ -152,14 +152,24 @@ orquestador/
 ├── src/
 │   └── orquestador/
 │       ├── __init__.py
-│       ├── main.py              # FastAPI app principal
-│       ├── config.py            # Configuracion y env vars
-│       ├── models.py            # Modelos Pydantic
-│       ├── llm.py               # Cliente OpenAI
-│       ├── mcp_client.py        # Cliente MCP + Circuit Breaker
-│       ├── memory.py            # Memoria conversacional
-│       ├── metrics.py           # Metricas
-│       ├── logging_config.py    # Logging JSON
+│       ├── api/
+│       │   ├── __init__.py
+│       │   └── main.py          # FastAPI app principal
+│       ├── config/
+│       │   ├── __init__.py
+│       │   ├── config.py        # Configuracion y env vars
+│       │   └── models.py        # Modelos Pydantic
+│       ├── integrations/
+│       │   ├── __init__.py
+│       │   ├── llm.py           # Cliente OpenAI
+│       │   └── mcp_client.py    # Cliente MCP + Circuit Breaker
+│       ├── services/
+│       │   ├── __init__.py
+│       │   └── memory.py        # Memoria conversacional
+│       ├── infrastructure/
+│       │   ├── __init__.py
+│       │   ├── logging_config.py  # Logging JSON
+│       │   └── metrics.py        # Metricas
 │       └── prompts/
 │           ├── __init__.py      # Builder de prompts
 │           └── orquestador_system.j2  # Template Jinja2
