@@ -228,14 +228,31 @@ async def health():
 
 @app.get("/config")
 async def config():
-    """Devuelve URLs MCP, flags y modelo OpenAI (para verificar config)."""
-    return {
-        "mcp_reserva_url": app_config.MCP_RESERVA_URL,
-        "mcp_cita_url": app_config.MCP_CITA_URL,
-        "mcp_venta_url": app_config.MCP_VENTA_URL,
-        "mcp_reserva_enabled": app_config.MCP_RESERVA_ENABLED,
+    """Devuelve configuración del orquestador (modo, URLs MCP, modelo OpenAI)."""
+    config_data = {
+        "agent_mode": app_config.AGENT_MODE,
         "openai_model": app_config.OPENAI_MODEL,
     }
+
+    # Agregar info de MCP solo si está en modo MCP
+    if app_config.AGENT_MODE == "mcp":
+        config_data.update({
+            "mcp_reserva_url": app_config.MCP_RESERVA_URL,
+            "mcp_cita_url": app_config.MCP_CITA_URL,
+            "mcp_venta_url": app_config.MCP_VENTA_URL,
+            "mcp_reserva_enabled": app_config.MCP_RESERVA_ENABLED,
+        })
+
+    # Agregar info de agentes disponibles en modo local
+    if app_config.AGENT_MODE == "local":
+        try:
+            from ..integrations.agent_invoker import get_available_agents
+        except ImportError:
+            from orquestador.integrations.agent_invoker import get_available_agents
+        config_data["agents_available"] = get_available_agents()
+        config_data["agent_paths"] = app_config._AGENT_PATHS
+
+    return config_data
 
 
 @app.get("/memory/stats")

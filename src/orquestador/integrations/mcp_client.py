@@ -1,6 +1,10 @@
 """
 Cliente MCP para consumir agentes especializados (Venta, Cita, Reserva).
 Incluye circuit breaker y retry con backoff exponencial.
+
+Soporta dos modos de ejecución (configurado en config.py):
+- "local": Invocación directa de agentes (monolítico, para FileZilla)
+- "mcp": Invocación vía HTTP/MCP (microservicios, con Docker)
 """
 
 import ast
@@ -20,9 +24,11 @@ except ImportError:
 try:
     from ..config import config as app_config
     from ..infrastructure.logging_config import get_logger
+    from .agent_invoker import invoke_agent_local, get_available_agents
 except ImportError:
     from orquestador.config import config as app_config
     from orquestador.infrastructure.logging_config import get_logger
+    from orquestador.integrations.agent_invoker import invoke_agent_local, get_available_agents
 
 logger = get_logger("mcp_client")
 _mcp_client: Optional[MultiServerMCPClient] = None
@@ -265,32 +271,48 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
 
 async def invoke_mcp_agent(agent_name: str, message: str, session_id: int, context: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
-    Invoca un agente MCP especializado con circuit breaker y retry con backoff exponencial.
-    
+    Invoca un agente especializado con circuit breaker y retry con backoff exponencial.
+
+    Soporta dos modos (según AGENT_MODE en config):
+    - "local": Invocación directa (monolítico)
+    - "mcp": Invocación vía HTTP/MCP (microservicios)
+
     Args:
         agent_name: Nombre del agente ("venta", "cita", "reserva")
         message: Mensaje del cliente
         session_id: ID de sesión para contexto (int, unificado con n8n)
         context: Contexto adicional (config del bot, etc.)
-    
+
     Returns:
-        Respuesta del agente MCP o None si hay error
+        Respuesta del agente o None si hay error
     """
     circuit_breaker = await _get_circuit_breaker(agent_name)
-    
+
     # Verificar circuit breaker
     if not circuit_breaker.can_attempt():
         logger.warning("Circuit abierto para %s, rechazando request", agent_name)
         return None
-    
+
+    # Determinar modo de invocación
+    use_local = app_config.AGENT_MODE == "local"
+
+    if use_local:
+        logger.debug("Usando modo LOCAL para agente %s", agent_name)
+    else:
+        logger.debug("Usando modo MCP para agente %s", agent_name)
+
     # Retry con backoff exponencial
     max_retries = app_config.MCP_MAX_RETRIES
     last_error = None
-    
+
     for attempt in range(max_retries):
         try:
-            result = await _invoke_mcp_agent_internal(agent_name, message, session_id, context)
-            
+            # Invocar según el modo configurado
+            if use_local:
+                result = await invoke_agent_local(agent_name, message, session_id, context)
+            else:
+                result = await _invoke_mcp_agent_internal(agent_name, message, session_id, context)
+
             if result is not None:
                 circuit_breaker.record_success()
                 if attempt > 0:
@@ -300,22 +322,22 @@ async def invoke_mcp_agent(agent_name: str, message: str, session_id: int, conte
                 # Resultado None se considera fallo
                 last_error = "Respuesta None del agente"
                 circuit_breaker.record_failure()
-                
+
         except asyncio.TimeoutError:
             last_error = f"Timeout (>{app_config.MCP_TIMEOUT}s)"
             circuit_breaker.record_failure()
             logger.warning("Timeout en intento %s/%s", attempt + 1, max_retries)
-            
+
         except Exception as e:
             last_error = str(e)
             circuit_breaker.record_failure()
             logger.warning("Error en intento %s/%s: %s", attempt + 1, max_retries, e)
-        
+
         if attempt < max_retries - 1:
             backoff_time = 2 ** attempt
             logger.info("Esperando %ss antes de reintentar...", backoff_time)
             await asyncio.sleep(backoff_time)
-    
+
     logger.error(
         "Todos los intentos fallaron para %s. Último error: %s. Circuit: %s, Fallos: %s",
         agent_name, last_error, circuit_breaker.get_state(), circuit_breaker.failure_count
