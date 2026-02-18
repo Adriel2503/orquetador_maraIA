@@ -26,6 +26,7 @@ except ImportError:
 
 logger = get_logger("mcp_client")
 _mcp_client: Optional[MultiServerMCPClient] = None
+_mcp_client_lock = asyncio.Lock()
 
 
 class CircuitState(Enum):
@@ -36,48 +37,64 @@ class CircuitState(Enum):
 
 
 class CircuitBreaker:
-    """Circuit breaker simple para proteger llamadas MCP"""
-    
+    """Circuit breaker para proteger llamadas MCP. Thread-safe para concurrencia async."""
+
     def __init__(self, failure_threshold: int = 5, reset_timeout: int = 60):
         self.failure_threshold = failure_threshold
         self.reset_timeout = reset_timeout
         self.failure_count = 0
         self.last_failure_time: Optional[float] = None
         self.state = CircuitState.CLOSED
-    
+        self._lock = asyncio.Lock()
+
     def record_success(self):
-        """Registra un éxito y resetea el contador"""
+        """Registra un éxito y resetea el contador."""
         self.failure_count = 0
         self.state = CircuitState.CLOSED
         self.last_failure_time = None
-    
+
     def record_failure(self):
-        """Registra un fallo y actualiza el estado"""
+        """Registra un fallo y actualiza el estado."""
         self.failure_count += 1
         self.last_failure_time = time.time()
-        
+
         if self.failure_count >= self.failure_threshold:
             self.state = CircuitState.OPEN
             logger.warning("Circuit abierto después de %s fallos", self.failure_count)
-    
-    def can_attempt(self) -> bool:
-        """Verifica si se puede intentar una llamada"""
+
+    async def can_attempt(self) -> bool:
+        """
+        Verifica si se puede intentar una llamada.
+
+        CLOSED: siempre permite.
+        OPEN: permite solo si expiró el reset_timeout, transitando a HALF_OPEN bajo lock
+              para garantizar que una sola coroutine realice esa transición.
+        HALF_OPEN: permite exactamente un intento a la vez; las demás coroutines ven
+                   el estado como OPEN (bloqueado) hasta que el intento confirme éxito
+                   (record_success → CLOSED) o falle (record_failure → OPEN).
+        """
         if self.state == CircuitState.CLOSED:
             return True
-        
+
         if self.state == CircuitState.OPEN:
-            # Verificar si ha pasado el tiempo de reset
             if self.last_failure_time and (time.time() - self.last_failure_time) >= self.reset_timeout:
-                self.state = CircuitState.HALF_OPEN
-                logger.info("Circuit en estado HALF_OPEN, probando recuperación")
+                async with self._lock:
+                    # Double-check: otra coroutine pudo haber transitado ya
+                    if self.state == CircuitState.OPEN:
+                        self.state = CircuitState.HALF_OPEN
+                        logger.info("Circuit en estado HALF_OPEN, probando recuperación")
                 return True
             return False
-        
-        # HALF_OPEN: permitir un intento
+
+        # HALF_OPEN: solo 1 intento a la vez; bloqueamos el estado para las demás
+        async with self._lock:
+            if self.state != CircuitState.HALF_OPEN:
+                return self.state == CircuitState.CLOSED
+            self.state = CircuitState.OPEN  # las demás coroutines verán OPEN hasta confirmar éxito
         return True
-    
+
     def get_state(self) -> str:
-        """Retorna el estado actual como string"""
+        """Retorna el estado actual como string."""
         return self.state.value
 
 
@@ -106,40 +123,51 @@ async def get_circuit_breaker_states() -> Dict[str, Dict[str, Any]]:
         }
 
 
-def _get_mcp_client() -> Optional[MultiServerMCPClient]:
-    """Lazy init del cliente MCP."""
+async def _get_mcp_client() -> Optional[MultiServerMCPClient]:
+    """
+    Lazy init del cliente MCP. Thread-safe para concurrencia async.
+    Usa double-checked locking para garantizar una única instancia por proceso.
+    """
     global _mcp_client
-    
+
     if not MCP_AVAILABLE:
         logger.warning("langchain-mcp-adapters no está instalado. Instala con: pip install langchain-mcp-adapters")
         return None
-    
-    if _mcp_client is None:
+
+    # Fast path: si ya existe, devolver sin tomar el lock (caso habitual)
+    if _mcp_client is not None:
+        return _mcp_client
+
+    async with _mcp_client_lock:
+        # Double-check: otra corutina pudo haberlo creado mientras esperábamos el lock
+        if _mcp_client is not None:
+            return _mcp_client
+
         servers: Dict[str, Dict[str, str]] = {}
-        
+
         if app_config.MCP_RESERVA_ENABLED and app_config.MCP_RESERVA_URL:
             servers["reserva"] = {
                 "transport": "http",
                 "url": app_config.MCP_RESERVA_URL
             }
-        
+
         if app_config.MCP_CITA_ENABLED and app_config.MCP_CITA_URL:
             servers["cita"] = {
                 "transport": "http",
                 "url": app_config.MCP_CITA_URL
             }
-        
+
         if not servers:
             logger.warning("No hay servidores MCP configurados")
             return None
-        
+
         try:
             _mcp_client = MultiServerMCPClient(servers)
             logger.info("Cliente MCP inicializado con servidores: %s", list(servers.keys()))
         except Exception as e:
             logger.exception("Error inicializando cliente MCP: %s", e)
             return None
-    
+
     return _mcp_client
 
 
@@ -194,7 +222,7 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
     """
     Invocación interna del agente MCP sin circuit breaker ni retry.
     """
-    client = _get_mcp_client()
+    client = await _get_mcp_client()
     if client is None:
         return None
     
@@ -279,7 +307,7 @@ async def invoke_mcp_agent(agent_name: str, message: str, session_id: int, conte
     circuit_breaker = await _get_circuit_breaker(agent_name)
     
     # Verificar circuit breaker
-    if not circuit_breaker.can_attempt():
+    if not await circuit_breaker.can_attempt():
         logger.warning("Circuit abierto para %s, rechazando request", agent_name)
         return None
     

@@ -80,6 +80,109 @@ app.add_middleware(
 )
 
 
+async def _process_chat(request: ChatRequest) -> ChatResponse:
+    """Lógica completa del flujo chat: memoria, contexto, OpenAI, MCP y guardado."""
+    start_time = time.perf_counter()
+    request_dict = request.model_dump()
+    logger.info(
+        "POST /api/agent/chat request",
+        extra={"extra_fields": {
+            "request_message": request.message,
+            "session_id": request.session_id,
+            "nombre_bot": request.config.nombre_bot,
+            "id_empresa": request.config.id_empresa,
+            "mcp_reserva_url": app_config.MCP_RESERVA_URL,
+            "openai_model": app_config.OPENAI_MODEL,
+        }}
+    )
+    logger.debug("Request body: %s", json.dumps(request_dict, ensure_ascii=False))
+
+    # 1. CARGAR MEMORIA (historial de conversación)
+    memory = await memory_manager.get(request.session_id, limit=10)
+    logger.info("Memoria cargada", extra={"extra_fields": {"session_id": request.session_id, "turnos": len(memory)}})
+    current_agent = None
+    if memory:
+        current_agent = await memory_manager.get_current_agent(request.session_id)
+        if current_agent:
+            logger.info("Agente activo en sesión", extra={"extra_fields": {"session_id": request.session_id, "agent": current_agent}})
+
+    # 2. Obtener contexto de negocio (para responder preguntas básicas sin delegar)
+    contexto_negocio = await asyncio.to_thread(
+        _fetch_contexto_negocio_sync, request.config.id_empresa
+    )
+    if contexto_negocio:
+        logger.debug("Contexto de negocio cargado para id_empresa=%s", request.config.id_empresa)
+
+    # 3. System prompt del orquestador CON memoria y contexto de negocio
+    config_dict = request.config.model_dump()
+    system_prompt = build_orquestador_system_prompt_with_memory(
+        config_dict, memory, contexto_negocio=contexto_negocio
+    )
+    logger.debug("System prompt length: %s chars", len(system_prompt))
+
+    # 4. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (async nativo)
+    reply, agent_to_invoke = await invoke_orquestador(system_prompt, request.message)
+
+    logger.info(
+        "Orquestador decidió",
+        extra={"extra_fields": {"agent_to_invoke": agent_to_invoke, "reply_preview": reply[:200]}}
+    )
+
+    # 5. Si el orquestador detectó que debe delegar, llamar al agente MCP
+    final_reply = reply
+    agent_used = None
+    action = "respond"
+
+    if agent_to_invoke:
+        logger.info("Delegando a agente MCP", extra={"extra_fields": {"agent": agent_to_invoke}})
+
+        context = {
+            "session_id": request.session_id,
+            "config": request.config.model_dump(),
+        }
+
+        specialist_response = await invoke_mcp_agent(
+            agent_name=agent_to_invoke,
+            message=request.message,
+            session_id=request.session_id,
+            context=context
+        )
+
+        if specialist_response:
+            logger.info(
+                "Respuesta MCP recibida",
+                extra={"extra_fields": {"agent": agent_to_invoke, "response_preview": specialist_response[:150]}}
+            )
+            final_reply = specialist_response
+            agent_used = agent_to_invoke
+            action = "delegate"
+        else:
+            logger.warning(
+                "Error al invocar agente MCP, usando respuesta orquestador",
+                extra={"extra_fields": {"agent": agent_to_invoke}}
+            )
+            final_reply = reply
+            action = "respond"
+
+    # 6. GUARDAR EN MEMORIA
+    await memory_manager.add(
+        session_id=request.session_id,
+        user_message=request.message,
+        agent_used=agent_used,
+        response=final_reply
+    )
+
+    logger.info("Respuesta final", extra={"extra_fields": {"session_id": request.session_id, "action": action, "reply_preview": final_reply[:200]}})
+
+    app_metrics.record_request(time.perf_counter() - start_time, action, error=False)
+    return ChatResponse(
+        reply=final_reply,
+        session_id=request.session_id,
+        agent_used=agent_used,
+        action=action
+    )
+
+
 @app.post("/api/agent/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
@@ -94,129 +197,40 @@ async def chat(request: ChatRequest):
             status_code=400,
             detail="El campo 'message' no puede estar vacío"
         )
-    
+
     if request.session_id is None or request.session_id < 0:
         raise HTTPException(
             status_code=400,
             detail="El campo 'session_id' debe ser un entero no negativo"
         )
-    
+
     if not request.config.id_empresa or request.config.id_empresa <= 0:
         raise HTTPException(
             status_code=400,
             detail="El campo 'config.id_empresa' debe ser un número mayor a 0"
         )
-    
-    start_time = time.perf_counter()
-    try:
-        request_dict = request.model_dump()
-        logger.info(
-            "POST /api/agent/chat request",
-            extra={"extra_fields": {
-                "request_message": request.message,
-                "session_id": request.session_id,
-                "nombre_bot": request.config.nombre_bot,
-                "id_empresa": request.config.id_empresa,
-                "mcp_reserva_url": app_config.MCP_RESERVA_URL,
-                "openai_model": app_config.OPENAI_MODEL,
-            }}
-        )
-        logger.debug("Request body: %s", json.dumps(request_dict, ensure_ascii=False))
-        
-        # 1. CARGAR MEMORIA (historial de conversación)
-        memory = await memory_manager.get(request.session_id, limit=10)
-        logger.info("Memoria cargada", extra={"extra_fields": {"session_id": request.session_id, "turnos": len(memory)}})
-        current_agent = None
-        if memory:
-            current_agent = await memory_manager.get_current_agent(request.session_id)
-            if current_agent:
-                logger.info("Agente activo en sesión", extra={"extra_fields": {"session_id": request.session_id, "agent": current_agent}})
-        
-        # 2. Obtener contexto de negocio (para responder preguntas básicas sin delegar)
-        contexto_negocio = await asyncio.to_thread(
-            _fetch_contexto_negocio_sync, request.config.id_empresa
-        )
-        if contexto_negocio:
-            logger.debug("Contexto de negocio cargado para id_empresa=%s", request.config.id_empresa)
 
-        # 3. System prompt del orquestador CON memoria y contexto de negocio
-        config_dict = request.config.model_dump()
-        system_prompt = build_orquestador_system_prompt_with_memory(
-            config_dict, memory, contexto_negocio=contexto_negocio
+    try:
+        return await asyncio.wait_for(
+            _process_chat(request),
+            timeout=app_config.CHAT_TIMEOUT
         )
-        logger.debug("System prompt length: %s chars", len(system_prompt))
-        
-        # 4. Agente orquestador (OpenAI): system prompt + mensaje → respuesta (async nativo)
-        reply, agent_to_invoke = await invoke_orquestador(system_prompt, request.message)
-        
-        logger.info(
-            "Orquestador decidió",
-            extra={"extra_fields": {"agent_to_invoke": agent_to_invoke, "reply_preview": reply[:200]}}
+    except asyncio.TimeoutError:
+        logger.error(
+            "Chat timeout (>%ss) session_id=%s",
+            app_config.CHAT_TIMEOUT,
+            request.session_id,
         )
-        
-        # 5. Si el orquestador detectó que debe delegar, llamar al agente MCP
-        final_reply = reply
-        agent_used = None
-        action = "respond"
-        
-        if agent_to_invoke:
-            logger.info("Delegando a agente MCP", extra={"extra_fields": {"agent": agent_to_invoke}})
-            
-            context = {
-                "session_id": request.session_id,
-                "config": request.config.model_dump(),
-            }
-            
-            specialist_response = await invoke_mcp_agent(
-                agent_name=agent_to_invoke,
-                message=request.message,
-                session_id=request.session_id,
-                context=context
-            )
-            
-            if specialist_response:
-                logger.info(
-                    "Respuesta MCP recibida",
-                    extra={"extra_fields": {"agent": agent_to_invoke, "response_preview": specialist_response[:150]}}
-                )
-                final_reply = specialist_response
-                agent_used = agent_to_invoke
-                action = "delegate"
-            else:
-                logger.warning(
-                    "Error al invocar agente MCP, usando respuesta orquestador",
-                    extra={"extra_fields": {"agent": agent_to_invoke}}
-                )
-                final_reply = reply
-                action = "respond"
-        
-        # 6. GUARDAR EN MEMORIA
-        await memory_manager.add(
-            session_id=request.session_id,
-            user_message=request.message,
-            agent_used=agent_used,
-            response=final_reply
-        )
-        
-        logger.info("Respuesta final", extra={"extra_fields": {"session_id": request.session_id, "action": action, "reply_preview": final_reply[:200]}})
-        
-        app_metrics.record_request(time.perf_counter() - start_time, action, error=False)
-        return ChatResponse(
-            reply=final_reply,
-            session_id=request.session_id,
-            agent_used=agent_used,
-            action=action
-        )
-    
+        raise HTTPException(status_code=504, detail="El agente tardó demasiado en responder. Intenta de nuevo.")
+    except asyncio.CancelledError:
+        raise
     except ValueError as e:
         logger.error("Config/LLM error: %s", e)
-        app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Error procesando request: %s", e)
-        app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -29,7 +29,7 @@ class ChatConfig(BaseModel):
     agendar_usuario: Optional[bool] = None
     agendar_sucursal: Optional[bool] = None
     # Para citas (enviados por n8n, reenviados a agentes)
-    id_usuario: Optional[int] = None
+    usuario_id: Optional[int] = None
     correo_usuario: Optional[str] = None
 
     @field_validator('agendar_usuario', 'agendar_sucursal', mode='before')

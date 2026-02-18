@@ -42,3 +42,6 @@ MCP_TIMEOUT = int(os.getenv("MCP_TIMEOUT", "30"))
 MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD = int(os.getenv("MCP_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "5"))
 MCP_CIRCUIT_BREAKER_RESET_TIMEOUT = int(os.getenv("MCP_CIRCUIT_BREAKER_RESET_TIMEOUT", "60"))
 MCP_MAX_RETRIES = int(os.getenv("MCP_MAX_RETRIES", "3"))
+
+# Timeout total del flujo completo chat (debe ser > OPENAI_TIMEOUT + MCP_TIMEOUT para el caso normal)
+CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT", "120"))
