@@ -6,7 +6,8 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
+from datetime import datetime, timedelta
 
 # Permitir ejecución directa con python main.py
 # Si se ejecuta directamente (no como módulo), ajustar el path
@@ -43,24 +44,91 @@ except ImportError:
 
 logger = get_logger("main")
 
+# Cache simple + circuit breaker para contexto de negocio
+_contexto_cache: Dict[int, tuple[str, datetime]] = {}  # id_empresa -> (contexto, timestamp)
+_contexto_cache_ttl = 3600  # 1 hora
+_contexto_failures: Dict[int, tuple[int, datetime]] = {}  # id_empresa -> (failure_count, last_failure_time)
+_contexto_failure_threshold = 3
+_contexto_failure_reset = 300  # 5 minutos
+
+
+def _is_contexto_circuit_open(id_empresa: int) -> bool:
+    """Verifica si el circuit breaker para contexto está abierto."""
+    if id_empresa not in _contexto_failures:
+        return False
+    failure_count, last_failure_time = _contexto_failures[id_empresa]
+    if failure_count >= _contexto_failure_threshold:
+        # Verificar si expiró el reset timeout
+        if (datetime.now() - last_failure_time).total_seconds() < _contexto_failure_reset:
+            return True
+        # Expiró, resetear
+        del _contexto_failures[id_empresa]
+        return False
+    return False
+
 
 def _fetch_contexto_negocio_sync(id_empresa: int) -> Optional[str]:
-    """Llama al endpoint para obtener contexto de negocio (sync, para ejecutar en thread)."""
-    url = app_config.CONTEXTO_NEGOCIO_ENDPOINT
-    body = _json_mod.dumps({"codOpe": "OBTENER_CONTEXTO_NEGOCIO", "id_empresa": id_empresa}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=app_config.CONTEXTO_NEGOCIO_TIMEOUT) as resp:
-            data = _json_mod.loads(resp.read().decode())
-            if data.get("success") and data.get("contexto_negocio"):
-                return data["contexto_negocio"]
-    except Exception as e:
-        logger.debug("No se pudo obtener contexto de negocio: %s", e)
+    """
+    Obtiene contexto de negocio con cache + circuit breaker + retry con backoff.
+    Llama al endpoint para obtener contexto de negocio (sync, para ejecutar en thread).
+    """
+    global _contexto_cache, _contexto_failures
+
+    # 1. Verificar cache
+    if id_empresa in _contexto_cache:
+        contexto, timestamp = _contexto_cache[id_empresa]
+        if (datetime.now() - timestamp).total_seconds() < _contexto_cache_ttl:
+            logger.debug("Contexto desde cache para id_empresa=%s", id_empresa)
+            return contexto
+
+    # 2. Verificar circuit breaker
+    if _is_contexto_circuit_open(id_empresa):
+        logger.warning("Circuit abierto para contexto de negocio id_empresa=%s", id_empresa)
+        return None
+
+    # 3. Retry con backoff exponencial (hasta 2 intentos)
+    max_retries = 2
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            url = app_config.CONTEXTO_NEGOCIO_ENDPOINT
+            body = _json_mod.dumps({"codOpe": "OBTENER_CONTEXTO_NEGOCIO", "id_empresa": id_empresa}).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=app_config.CONTEXTO_NEGOCIO_TIMEOUT) as resp:
+                data = _json_mod.loads(resp.read().decode())
+                if data.get("success") and data.get("contexto_negocio"):
+                    contexto = data["contexto_negocio"]
+                    # Guardar en cache
+                    _contexto_cache[id_empresa] = (contexto, datetime.now())
+                    # Reset failures si era éxito
+                    if id_empresa in _contexto_failures:
+                        del _contexto_failures[id_empresa]
+                    return contexto
+        except Exception as e:
+            last_error = e
+            logger.debug(
+                "Error obteniendo contexto intento %d/%d id_empresa=%s: %s",
+                attempt + 1, max_retries, id_empresa, e
+            )
+            # Retry con backoff: 1s, 2s
+            if attempt < max_retries - 1:
+                backoff = 2 ** attempt
+                time.sleep(backoff)
+    
+    # Todos los intentos fallaron
+    logger.debug("Todos los intentos fallaron para contexto id_empresa=%s", id_empresa)
+    # Registrar fallo en circuit breaker
+    if id_empresa not in _contexto_failures:
+        _contexto_failures[id_empresa] = (0, datetime.now())
+    failure_count, _ = _contexto_failures[id_empresa]
+    _contexto_failures[id_empresa] = (failure_count + 1, datetime.now())
+    
     return None
 
 
@@ -174,7 +242,7 @@ async def _process_chat(request: ChatRequest) -> ChatResponse:
 
     logger.info("Respuesta final", extra={"extra_fields": {"session_id": request.session_id, "action": action, "reply_preview": final_reply[:200]}})
 
-    app_metrics.record_request(time.perf_counter() - start_time, action, error=False)
+    await app_metrics.record_request(time.perf_counter() - start_time, action, error=False)
     return ChatResponse(
         reply=final_reply,
         session_id=request.session_id,
@@ -271,9 +339,11 @@ async def clear_memory(session_id: str):
 
 @app.get("/metrics")
 async def metrics():
-    """Métricas in-memory: requests, errores, latencia, estado circuit breakers (JSON)."""
-    cb_states = await get_circuit_breaker_states()
-    return app_metrics.get_metrics_with_circuit_breakers(cb_states)
+    """
+    Endpoint Prometheus. Devuelve métricas en formato text/plain.
+    Puede ser scrapeado por Prometheus cada 60s para almacenar en su DB.
+    """
+    return app_metrics.get_metrics_endpoint()
 
 
 @app.get("/")

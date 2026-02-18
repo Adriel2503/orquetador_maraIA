@@ -61,6 +61,11 @@ def get_logger(name: str) -> logging.Logger:
 
 
 # Inicializar al importar (nivel INFO por defecto)
-setup_logging()
+# Wrappear en try/except para evitar fallar silenciosamente si hay error de permisos
+try:
+    setup_logging()
+except Exception as e:
+    import sys
+    print(f"Warning: Error configurando logging: {e}", file=sys.stderr)
 
 __all__ = ["get_logger", "setup_logging", "JsonFormatter"]

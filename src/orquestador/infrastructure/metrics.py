@@ -1,51 +1,56 @@
 """
-Métricas in-memory del orquestador para observabilidad.
-Contadores de requests, errores, latencia y estado de circuit breaker.
+Métricas del orquestador exportadas en formato Prometheus.
+Usa prometheus_client para contadores e histogramas.
+Sin almacenamiento en memoria - Prometheus scrapeea y almacena en su DB.
 """
 
-import time
-from typing import Dict, List, Any
+from prometheus_client import Counter, Histogram, generate_latest
 
 # Contadores
-_requests_total = 0
-_requests_errors = 0
-_requests_delegate = 0
-_requests_respond = 0
-# Latencias recientes (últimas N para promedio)
-_latencies: List[float] = []
-_LATENCY_SAMPLE_SIZE = 100
+requests_total = Counter(
+    'orquestador_requests_total',
+    'Total de requests procesadas',
+    ['status']  # "success" | "error"
+)
+
+requests_by_action = Counter(
+    'orquestador_requests_by_action_total',
+    'Requests por tipo de acción',
+    ['action']  # "delegate" | "respond"
+)
+
+# Histograma con buckets para latencias
+request_duration = Histogram(
+    'orquestador_request_duration_seconds',
+    'Duración de requests en segundos',
+    buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0)  # p50, p95, p99 calculados automáticamente
+)
 
 
-def record_request(latency_seconds: float, action: str, error: bool = False) -> None:
-    """Registra una request completada."""
-    global _requests_total, _requests_errors, _requests_delegate, _requests_respond, _latencies
-    _requests_total += 1
-    if error:
-        _requests_errors += 1
-    if action == "delegate":
-        _requests_delegate += 1
-    else:
-        _requests_respond += 1
-    _latencies.append(latency_seconds)
-    if len(_latencies) > _LATENCY_SAMPLE_SIZE:
-        _latencies.pop(0)
+async def record_request(latency_seconds: float, action: str, error: bool = False) -> None:
+    """
+    Registra una request completada.
+    
+    Prometheus automáticamente mantiene totales, sumas y calcula percentiles.
+    El /metrics endpoint scrapeea estos valores.
+    
+    Args:
+        latency_seconds: Latencia de la request en segundos
+        action: Acción realizada ("delegate" | "respond")
+        error: Si ocurrió error (default False)
+    """
+    status = "error" if error else "success"
+    requests_total.labels(status=status).inc()
+    requests_by_action.labels(action=action).inc()
+    request_duration.observe(latency_seconds)
 
 
-def get_metrics() -> Dict[str, Any]:
-    """Devuelve todas las métricas en un dict (para JSON /metrics)."""
-    avg_latency = sum(_latencies) / len(_latencies) if _latencies else 0.0
-    return {
-        "requests_total": _requests_total,
-        "requests_errors": _requests_errors,
-        "requests_delegate": _requests_delegate,
-        "requests_respond": _requests_respond,
-        "latency_avg_seconds": round(avg_latency, 4),
-        "latency_samples": len(_latencies),
-    }
+def get_metrics_endpoint() -> bytes:
+    """
+    Genera la salida en formato Prometheus para el endpoint /metrics.
+    Devuelve bytes listos para servir con content-type: text/plain; version=0.0.4
+    """
+    return generate_latest()
 
 
-def get_metrics_with_circuit_breakers(circuit_breaker_states: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Devuelve métricas incluyendo estado de circuit breakers por agente."""
-    base = get_metrics()
-    base["circuit_breakers"] = circuit_breaker_states
-    return base
+__all__ = ["record_request", "get_metrics_endpoint", "requests_total", "requests_by_action", "request_duration"]

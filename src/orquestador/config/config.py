@@ -5,11 +5,18 @@ Configuración del orquestador (env, URLs MCP).
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-# .env en la raíz del proyecto orquestador (orquestador/.env)
-_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-load_dotenv(_BASE_DIR / ".env")
+# Buscar .env hacia arriba desde este archivo hasta encontrarlo o llegar a raíz.
+# find_dotenv() es robusto y funciona independientemente de dónde se ejecute.
+_ENV_FILE = find_dotenv(usecwd=True)
+if _ENV_FILE:
+    load_dotenv(_ENV_FILE)
+else:
+    # Si no encuentra .env, intenta en la estructura esperada (fallback)
+    _BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+    if (_BASE_DIR / ".env").exists():
+        load_dotenv(_BASE_DIR / ".env")
 
 # Versión del servicio (única fuente de verdad)
 VERSION = "0.2.0"
