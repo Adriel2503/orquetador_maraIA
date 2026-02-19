@@ -300,14 +300,15 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
         return None
 
     logger.debug("Tools disponibles (desde cache): %s", [tool.name for tool in tools])
-    
-    # Buscar el tool "chat" que es el principal
+
+    # Convención: cada agente expone su tool como {agent}_chat (venta_chat, cita_chat, reserva_chat)
+    target_tool_name = f"{agent_name}_chat"
     chat_tool = None
     for tool in tools:
-        if tool.name.lower() in ["chat", "process_message", "handle_message", "respond"]:
+        if tool.name.lower() == target_tool_name:
             chat_tool = tool
             break
-    
+
     if chat_tool:
         logger.debug("Usando tool: %s", chat_tool.name)
         result = await asyncio.wait_for(
@@ -322,8 +323,8 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
         return text if text else None
     
     tools_info = ", ".join([tool.name for tool in tools[:5]])
-    logger.warning("No se encontró tool 'chat'. Tools disponibles: %s", tools_info)
-    return f"[MCP {agent_name}] Agente disponible pero sin tool 'chat'. Tools: {tools_info}"
+    logger.warning("No se encontró tool '%s'. Tools disponibles: %s", target_tool_name, tools_info)
+    return f"[MCP {agent_name}] Agente disponible pero sin tool '{target_tool_name}'. Tools: {tools_info}"
 
 
 async def invoke_mcp_agent(agent_name: str, message: str, session_id: int, context: Optional[Dict[str, Any]] = None) -> Optional[str]:

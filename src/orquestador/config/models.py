@@ -71,9 +71,9 @@ class OrquestradorDecision(BaseModel):
     action: Literal["delegate", "respond"] = Field(
         description="'delegate' si debe llamar a un agente especializado, 'respond' si el orquestador responde directamente"
     )
-    agent_name: Optional[Literal["reserva", "venta", "cita"]] = Field(
+    agent_name: Optional[Literal["venta", "cita"]] = Field(
         default=None,
-        description="Nombre del agente al que delegar. Solo si action='delegate'"
+        description="Cuando delegues: usa 'venta' si la modalidad es Ventas, 'cita' si es Citas. Debe coincidir con la modalidad indicada en el system prompt. Solo si action='delegate'."
     )
     response: str = Field(
         description="Respuesta al usuario. Si action='delegate', puede ser un mensaje transitorio. Si action='respond', es la respuesta final."
