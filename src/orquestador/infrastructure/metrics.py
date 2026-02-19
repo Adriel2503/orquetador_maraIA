@@ -26,6 +26,12 @@ request_duration = Histogram(
     buckets=(0.1, 0.5, 1.0, 2.0, 5.0, 10.0)  # p50, p95, p99 calculados automáticamente
 )
 
+llm_agent_corrections_total = Counter(
+    'orquestador_llm_agent_corrections_total',
+    'Veces que se corrigió agent_name por desviación de modalidad',
+    ['modalidad', 'llm_agent']
+)
+
 
 async def record_request(latency_seconds: float, action: str, error: bool = False) -> None:
     """
@@ -53,4 +59,11 @@ def get_metrics_endpoint() -> bytes:
     return generate_latest()
 
 
-__all__ = ["record_request", "get_metrics_endpoint", "requests_total", "requests_by_action", "request_duration"]
+__all__ = [
+    "record_request",
+    "get_metrics_endpoint",
+    "requests_total",
+    "requests_by_action",
+    "request_duration",
+    "llm_agent_corrections_total",
+]

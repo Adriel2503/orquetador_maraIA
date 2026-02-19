@@ -49,6 +49,9 @@ def _modalidad_to_agent(modalidad: str) -> str:
     return "cita"
 
 
+modalidad_to_agent = _modalidad_to_agent
+
+
 def build_orquestador_system_prompt(config: Dict[str, Any]) -> str:
     """
     Construye el system prompt del orquestador a partir de la config (ChatConfig).
@@ -112,4 +115,8 @@ def build_orquestador_system_prompt_with_memory(
     return _orquestador_template.render(**variables)
 
 
-__all__ = ["build_orquestador_system_prompt", "build_orquestador_system_prompt_with_memory"]
+__all__ = [
+    "build_orquestador_system_prompt",
+    "build_orquestador_system_prompt_with_memory",
+    "modalidad_to_agent",
+]

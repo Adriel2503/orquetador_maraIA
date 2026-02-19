@@ -28,7 +28,7 @@ from fastapi.responses import Response
 try:
     from ..config.models import ChatRequest, ChatResponse
     from ..config import config as app_config
-    from ..prompts import build_orquestador_system_prompt_with_memory
+    from ..prompts import build_orquestador_system_prompt_with_memory, modalidad_to_agent
     from ..integrations.llm import invoke_orquestador
     from ..integrations.mcp_client import invoke_mcp_agent, get_circuit_breaker_states
     from ..services.memory import memory_manager
@@ -37,7 +37,7 @@ try:
 except ImportError:
     from orquestador.config.models import ChatRequest, ChatResponse
     from orquestador.config import config as app_config
-    from orquestador.prompts import build_orquestador_system_prompt_with_memory
+    from orquestador.prompts import build_orquestador_system_prompt_with_memory, modalidad_to_agent
     from orquestador.integrations.llm import invoke_orquestador
     from orquestador.integrations.mcp_client import invoke_mcp_agent, get_circuit_breaker_states
     from orquestador.services.memory import memory_manager
@@ -204,6 +204,24 @@ async def _process_chat(request: ChatRequest) -> ChatResponse:
         "Orquestador decidió",
         extra={"extra_fields": {"agent_to_invoke": agent_to_invoke, "reply_preview": reply[:200]}}
     )
+
+    # Validar que agent_to_invoke coincida con la modalidad; corregir si el LLM se desvía
+    agent_key = modalidad_to_agent(request.config.modalidad or "")
+    if agent_to_invoke and agent_to_invoke != agent_key:
+        logger.warning(
+            "LLM devolvió agent distinto a modalidad; corregido",
+            extra={"extra_fields": {
+                "llm_agent": agent_to_invoke,
+                "modalidad": request.config.modalidad,
+                "agent_corregido": agent_key,
+                "session_id": request.session_id,
+            }}
+        )
+        app_metrics.llm_agent_corrections_total.labels(
+            modalidad=(request.config.modalidad or "unknown"),
+            llm_agent=agent_to_invoke,
+        ).inc()
+        agent_to_invoke = agent_key
 
     # 5. Si el orquestador detectó que debe delegar, llamar al agente MCP
     final_reply = reply
