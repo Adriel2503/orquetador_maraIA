@@ -8,6 +8,14 @@ from typing import Any, Dict, List, Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent
+
+# Singleton: se crea una sola vez al importar el módulo y se reutiliza en cada request
+_jinja_env = Environment(
+    loader=FileSystemLoader(str(_TEMPLATES_DIR)),
+    autoescape=select_autoescape(disabled_extensions=()),
+)
+_orquestador_template = _jinja_env.get_template("orquestador_system.j2")
+
 _DEFAULTS: Dict[str, Any] = {
     "nombre_bot": "Asistente",
     "objetivo_principal": "ayudar a los clientes",
@@ -16,7 +24,7 @@ _DEFAULTS: Dict[str, Any] = {
     "frase_des": "¡Gracias por contactarnos!",
     "frase_no_sabe": "No tengo esa información; permíteme transferirte con un agente.",
     "frase_esc": "Te voy a comunicar con un agente para ayudarte mejor.",
-    "modalidad": "citas y consultas",
+    "modalidad": "citas",
 }
 
 
@@ -26,6 +34,19 @@ def _apply_defaults(config: Dict[str, Any]) -> Dict[str, Any]:
         if v is not None and v != "":
             out[k] = v
     return out
+
+
+def _modalidad_to_agent(modalidad: str) -> str:
+    """
+    Mapea modalidad (n8n envía "Ventas" o "Citas") a agent_key.
+
+    Returns:
+        agent_key ("venta" o "cita") para usar en el prompt. El label se deriva en el template como agent_key + "s".
+    """
+    m = (modalidad or "").lower()
+    if "ventas" in m:
+        return "venta"
+    return "cita"
 
 
 def build_orquestador_system_prompt(config: Dict[str, Any]) -> str:
@@ -39,13 +60,9 @@ def build_orquestador_system_prompt(config: Dict[str, Any]) -> str:
     Returns:
         System prompt formateado.
     """
-    env = Environment(
-        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-        autoescape=select_autoescape(disabled_extensions=()),
-    )
-    template = env.get_template("orquestador_system.j2")
     variables = _apply_defaults(config)
-    return template.render(**variables)
+    variables["agent_key"] = _modalidad_to_agent(variables.get("modalidad", ""))
+    return _orquestador_template.render(**variables)
 
 
 def build_orquestador_system_prompt_with_memory(
@@ -66,6 +83,7 @@ def build_orquestador_system_prompt_with_memory(
     """
     # Variables base del template
     variables = _apply_defaults(config)
+    variables["agent_key"] = _modalidad_to_agent(variables.get("modalidad", ""))
     variables["contexto_negocio"] = (contexto_negocio or "").strip() or None
 
     # Detectar agente activo
@@ -90,14 +108,8 @@ def build_orquestador_system_prompt_with_memory(
     variables["has_memory"] = bool(memory)
     variables["current_agent"] = current_agent
     variables["history_text"] = history_text
-    
-    # Renderizar template
-    env = Environment(
-        loader=FileSystemLoader(str(_TEMPLATES_DIR)),
-        autoescape=select_autoescape(disabled_extensions=()),
-    )
-    template = env.get_template("orquestador_system.j2")
-    return template.render(**variables)
+
+    return _orquestador_template.render(**variables)
 
 
 __all__ = ["build_orquestador_system_prompt", "build_orquestador_system_prompt_with_memory"]

@@ -2,12 +2,14 @@
 
 import asyncio
 import json as _json_mod
+import os
 import sys
 import time
 import urllib.request
 from pathlib import Path
-from typing import Optional, Dict
-from datetime import datetime, timedelta
+from typing import Optional
+
+from cachetools import TTLCache
 
 # Permitir ejecución directa con python main.py
 # Si se ejecuta directamente (no como módulo), ajustar el path
@@ -20,7 +22,7 @@ if __package__ is None:
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import json
+from fastapi.responses import Response
 
 # Importación que funciona tanto como módulo como script directo
 try:
@@ -44,42 +46,44 @@ except ImportError:
 
 logger = get_logger("main")
 
-# Cache simple + circuit breaker para contexto de negocio
-_contexto_cache: Dict[int, tuple[str, datetime]] = {}  # id_empresa -> (contexto, timestamp)
-_contexto_cache_ttl = 3600  # 1 hora
-_contexto_failures: Dict[int, tuple[int, datetime]] = {}  # id_empresa -> (failure_count, last_failure_time)
+# Cache con TTL y límite de tamaño para evitar memory leak en producción multiempresa.
+# maxsize=500 → máximo 500 empresas en memoria simultáneamente (LRU eviction al superar límite)
+# ttl=3600    → cada entrada expira automáticamente a la 1 hora (evita datos obsoletos)
+_contexto_cache: TTLCache = TTLCache(maxsize=500, ttl=3600)  # id_empresa -> contexto (str)
+
+# Circuit breaker: también acotado con TTL (5 min) para auto-reset de fallos antiguos
+_contexto_failures: TTLCache = TTLCache(maxsize=500, ttl=300)  # id_empresa -> failure_count (int)
 _contexto_failure_threshold = 3
-_contexto_failure_reset = 300  # 5 minutos
 
 
 def _is_contexto_circuit_open(id_empresa: int) -> bool:
-    """Verifica si el circuit breaker para contexto está abierto."""
-    if id_empresa not in _contexto_failures:
-        return False
-    failure_count, last_failure_time = _contexto_failures[id_empresa]
-    if failure_count >= _contexto_failure_threshold:
-        # Verificar si expiró el reset timeout
-        if (datetime.now() - last_failure_time).total_seconds() < _contexto_failure_reset:
-            return True
-        # Expiró, resetear
-        del _contexto_failures[id_empresa]
-        return False
-    return False
+    """Verifica si el circuit breaker para contexto está abierto.
+    
+    TTLCache expira automáticamente entradas viejas (ttl=300s),
+    por lo que no necesitamos comparar timestamps manualmente.
+    """
+    failure_count = _contexto_failures.get(id_empresa, 0)
+    return failure_count >= _contexto_failure_threshold
 
 
 def _fetch_contexto_negocio_sync(id_empresa: int) -> Optional[str]:
     """
-    Obtiene contexto de negocio con cache + circuit breaker + retry con backoff.
-    Llama al endpoint para obtener contexto de negocio (sync, para ejecutar en thread).
+    Obtiene contexto de negocio con cache TTL + circuit breaker + retry con backoff.
+    Cachea incluso contexto vacío para evitar thrashing.
+    Se ejecuta en un thread separado (via asyncio.to_thread).
+    
+    TTLCache garantiza:
+    - Máximo 500 empresas en memoria (LRU eviction)
+    - Expiración automática a la 1 hora sin limpiezas manuales
     """
-    global _contexto_cache, _contexto_failures
-
-    # 1. Verificar cache
+    # 1. Verificar cache: TTLCache expira automáticamente, no necesitamos timestamp manual
     if id_empresa in _contexto_cache:
-        contexto, timestamp = _contexto_cache[id_empresa]
-        if (datetime.now() - timestamp).total_seconds() < _contexto_cache_ttl:
-            logger.debug("Contexto desde cache para id_empresa=%s", id_empresa)
-            return contexto
+        contexto = _contexto_cache[id_empresa]
+        logger.debug(
+            "Contexto desde cache para id_empresa=%s (valor=%s)",
+            id_empresa, "vacío" if not contexto else "presente"
+        )
+        return contexto if contexto else None
 
     # 2. Verificar circuit breaker
     if _is_contexto_circuit_open(id_empresa):
@@ -88,8 +92,7 @@ def _fetch_contexto_negocio_sync(id_empresa: int) -> Optional[str]:
 
     # 3. Retry con backoff exponencial (hasta 2 intentos)
     max_retries = 2
-    last_error = None
-    
+
     for attempt in range(max_retries):
         try:
             url = app_config.CONTEXTO_NEGOCIO_ENDPOINT
@@ -102,35 +105,33 @@ def _fetch_contexto_negocio_sync(id_empresa: int) -> Optional[str]:
             )
             with urllib.request.urlopen(req, timeout=app_config.CONTEXTO_NEGOCIO_TIMEOUT) as resp:
                 data = _json_mod.loads(resp.read().decode())
-                if data.get("success") and data.get("contexto_negocio"):
-                    contexto = data["contexto_negocio"]
-                    # Guardar en cache
-                    _contexto_cache[id_empresa] = (contexto, datetime.now())
-                    # Reset failures si era éxito
-                    if id_empresa in _contexto_failures:
-                        del _contexto_failures[id_empresa]
-                    return contexto
+                if data.get("success"):
+                    contexto = data.get("contexto_negocio") or ""
+                    # TTLCache almacena y expira automáticamente en 1 hora
+                    _contexto_cache[id_empresa] = contexto
+                    # Reset circuit breaker al tener éxito
+                    _contexto_failures.pop(id_empresa, None)
+                    return contexto if contexto else None
         except Exception as e:
-            last_error = e
             logger.debug(
                 "Error obteniendo contexto intento %d/%d id_empresa=%s: %s",
                 attempt + 1, max_retries, id_empresa, e
             )
-            # Retry con backoff: 1s, 2s
             if attempt < max_retries - 1:
-                backoff = 2 ** attempt
-                time.sleep(backoff)
-    
-    # Todos los intentos fallaron
+                time.sleep(2 ** attempt)  # backoff: 1s, 2s
+
+    # Todos los intentos fallaron: incrementar contador del circuit breaker
     logger.debug("Todos los intentos fallaron para contexto id_empresa=%s", id_empresa)
-    # Registrar fallo en circuit breaker
-    if id_empresa not in _contexto_failures:
-        _contexto_failures[id_empresa] = (0, datetime.now())
-    failure_count, _ = _contexto_failures[id_empresa]
-    _contexto_failures[id_empresa] = (failure_count + 1, datetime.now())
-    
+    current_failures = _contexto_failures.get(id_empresa, 0)
+    # TTLCache resetea automáticamente el contador luego de ttl=300s
+    _contexto_failures[id_empresa] = current_failures + 1
+
     return None
 
+
+# CORS - desde env o * como fallback (en producción especificar dominios)
+_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "*").split(",")
+_cors_origins = [o.strip() for o in _cors_origins if o.strip()]
 
 app = FastAPI(
     title="MaravIA Orquestador",
@@ -138,10 +139,10 @@ app = FastAPI(
     version=app_config.VERSION
 )
 
-# CORS - ajustar según necesidad
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # En producción, especificar dominios permitidos
+    allow_origins=_cors_origins,  # ["https://app.maravia.pe", "https://n8n.maravia.pe"] en producción
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -163,7 +164,7 @@ async def _process_chat(request: ChatRequest) -> ChatResponse:
             "openai_model": app_config.OPENAI_MODEL,
         }}
     )
-    logger.debug("Request body: %s", json.dumps(request_dict, ensure_ascii=False))
+    logger.debug("Request body: %s", _json_mod.dumps(request_dict, ensure_ascii=False))
 
     # 1. CARGAR MEMORIA (historial de conversación)
     memory = await memory_manager.get(request.session_id, limit=10)
@@ -175,9 +176,17 @@ async def _process_chat(request: ChatRequest) -> ChatResponse:
             logger.info("Agente activo en sesión", extra={"extra_fields": {"session_id": request.session_id, "agent": current_agent}})
 
     # 2. Obtener contexto de negocio (para responder preguntas básicas sin delegar)
-    contexto_negocio = await asyncio.to_thread(
-        _fetch_contexto_negocio_sync, request.config.id_empresa
-    )
+    contexto_negocio = None
+    try:
+        contexto_negocio = await asyncio.wait_for(
+            asyncio.to_thread(_fetch_contexto_negocio_sync, request.config.id_empresa),
+            timeout=app_config.CONTEXTO_NEGOCIO_TIMEOUT + 2  # +2s para overhead de thread pool
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Timeout obteniendo contexto de negocio id_empresa=%s", request.config.id_empresa)
+    except Exception as e:
+        logger.warning("Error inesperado en contexto de negocio: %s", e)
+    
     if contexto_negocio:
         logger.debug("Contexto de negocio cargado para id_empresa=%s", request.config.id_empresa)
 
@@ -259,31 +268,39 @@ async def chat(request: ChatRequest):
     Construye el system prompt (identidad, reglas), invoca el agente orquestador
     (OpenAI gpt-4o-mini / gpt-4o) y devuelve la respuesta.
     """
+    start_time = time.perf_counter()
+    
     # Validación de inputs
     if not request.message or not request.message.strip():
+        await app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(
             status_code=400,
             detail="El campo 'message' no puede estar vacío"
         )
 
     if request.session_id is None or request.session_id < 0:
+        await app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(
             status_code=400,
             detail="El campo 'session_id' debe ser un entero no negativo"
         )
 
     if not request.config.id_empresa or request.config.id_empresa <= 0:
+        await app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         raise HTTPException(
             status_code=400,
             detail="El campo 'config.id_empresa' debe ser un número mayor a 0"
         )
 
     try:
-        return await asyncio.wait_for(
+        response = await asyncio.wait_for(
             _process_chat(request),
             timeout=app_config.CHAT_TIMEOUT
         )
+        # Éxito - las métricas ya se registraron en _process_chat()
+        return response
     except asyncio.TimeoutError:
+        await app_metrics.record_request(time.perf_counter() - start_time, "timeout", error=True)
         logger.error(
             "Chat timeout (>%ss) session_id=%s",
             app_config.CHAT_TIMEOUT,
@@ -291,13 +308,16 @@ async def chat(request: ChatRequest):
         )
         raise HTTPException(status_code=504, detail="El agente tardó demasiado en responder. Intenta de nuevo.")
     except asyncio.CancelledError:
+        await app_metrics.record_request(time.perf_counter() - start_time, "cancelled", error=True)
         raise
     except ValueError as e:
+        await app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         logger.error("Config/LLM error: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
+        await app_metrics.record_request(time.perf_counter() - start_time, "respond", error=True)
         logger.exception("Error procesando request: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -343,7 +363,10 @@ async def metrics():
     Endpoint Prometheus. Devuelve métricas en formato text/plain.
     Puede ser scrapeado por Prometheus cada 60s para almacenar en su DB.
     """
-    return app_metrics.get_metrics_endpoint()
+    return Response(
+        content=app_metrics.get_metrics_endpoint(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/")

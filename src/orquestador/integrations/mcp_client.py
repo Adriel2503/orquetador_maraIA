@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional, Union
 
 try:
     from langchain_mcp_adapters.client import MultiServerMCPClient
-    from langchain_core.tools import StructuredTool
     MCP_AVAILABLE = True
 except ImportError:
     MultiServerMCPClient = None
@@ -27,6 +26,11 @@ except ImportError:
 logger = get_logger("mcp_client")
 _mcp_client: Optional[MultiServerMCPClient] = None
 _mcp_client_lock = asyncio.Lock()
+
+# Cache de tools: se carga una sola vez en el primer uso.
+# Las tools de los agentes MCP no cambian en tiempo de ejecución.
+_tools_cache: Optional[List] = None
+_tools_cache_lock = asyncio.Lock()
 
 
 class CircuitState(Enum):
@@ -47,20 +51,22 @@ class CircuitBreaker:
         self.state = CircuitState.CLOSED
         self._lock = asyncio.Lock()
 
-    def record_success(self):
-        """Registra un éxito y resetea el contador."""
-        self.failure_count = 0
-        self.state = CircuitState.CLOSED
-        self.last_failure_time = None
+    async def record_success(self) -> None:
+        """Registra un éxito y resetea el contador. Protegido con lock para evitar race conditions."""
+        async with self._lock:
+            self.failure_count = 0
+            self.state = CircuitState.CLOSED
+            self.last_failure_time = None
 
-    def record_failure(self):
-        """Registra un fallo y actualiza el estado."""
-        self.failure_count += 1
-        self.last_failure_time = time.time()
+    async def record_failure(self) -> None:
+        """Registra un fallo y actualiza el estado. Protegido con lock para evitar race conditions."""
+        async with self._lock:
+            self.failure_count += 1
+            self.last_failure_time = time.time()
 
-        if self.failure_count >= self.failure_threshold:
-            self.state = CircuitState.OPEN
-            logger.warning("Circuit abierto después de %s fallos", self.failure_count)
+            if self.failure_count >= self.failure_threshold:
+                self.state = CircuitState.OPEN
+                logger.warning("Circuit abierto después de %s fallos", self.failure_count)
 
     async def can_attempt(self) -> bool:
         """
@@ -157,6 +163,12 @@ async def _get_mcp_client() -> Optional[MultiServerMCPClient]:
                 "url": app_config.MCP_CITA_URL
             }
 
+        if app_config.MCP_VENTA_ENABLED and app_config.MCP_VENTA_URL:
+            servers["venta"] = {
+                "transport": "http",
+                "url": app_config.MCP_VENTA_URL
+            }
+
         if not servers:
             logger.warning("No hay servidores MCP configurados")
             return None
@@ -169,6 +181,49 @@ async def _get_mcp_client() -> Optional[MultiServerMCPClient]:
             return None
 
     return _mcp_client
+
+
+async def _get_cached_tools() -> Optional[List]:
+    """
+    Retorna la lista de tools MCP, cargándola una sola vez y cacheándola para
+    todas las invocaciones siguientes. Las tools no cambian en tiempo de ejecución.
+
+    Usa double-checked locking para evitar múltiples llamadas concurrentes al
+    primer uso y garantizar que el cache se inicialice exactamente una vez.
+    """
+    global _tools_cache
+
+    # Fast path: ya cacheadas (caso habitual tras la primera carga)
+    if _tools_cache is not None:
+        return _tools_cache
+
+    async with _tools_cache_lock:
+        # Double-check: otra coroutine pudo haberlas cargado mientras esperábamos
+        if _tools_cache is not None:
+            return _tools_cache
+
+        client = await _get_mcp_client()
+        if client is None:
+            return None
+
+        try:
+            tools = await asyncio.wait_for(
+                client.get_tools(),
+                timeout=app_config.MCP_TIMEOUT
+            )
+            if tools:
+                _tools_cache = tools
+                logger.info(
+                    "Tools MCP cacheadas (%d tools): %s",
+                    len(tools), [t.name for t in tools]
+                )
+            return tools
+        except asyncio.TimeoutError:
+            logger.error("Timeout cargando tools MCP (>%ss)", app_config.MCP_TIMEOUT)
+            return None
+        except Exception as e:
+            logger.exception("Error cargando tools MCP: %s", e)
+            return None
 
 
 def _extract_plain_text_from_agent_result(result: Any) -> str:
@@ -222,36 +277,29 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
     """
     Invocación interna del agente MCP sin circuit breaker ni retry.
     """
-    client = await _get_mcp_client()
-    if client is None:
-        return None
-    
     if agent_name not in ["venta", "cita", "reserva"]:
         logger.warning("Agente desconocido: %s", agent_name)
         return None
-    
-    # Solo invocar si el agente está configurado (reserva o cita)
+
+    # Verificar que el agente esté habilitado antes de cargar tools
     if agent_name == "reserva" and not (app_config.MCP_RESERVA_ENABLED and app_config.MCP_RESERVA_URL):
         logger.info("Agente reserva no configurado o deshabilitado.")
         return None
     if agent_name == "cita" and not (app_config.MCP_CITA_ENABLED and app_config.MCP_CITA_URL):
         logger.info("Agente cita no configurado o deshabilitado.")
         return None
-    if agent_name == "venta":
-        logger.info("Agente venta no disponible aún.")
+    if agent_name == "venta" and not (app_config.MCP_VENTA_ENABLED and app_config.MCP_VENTA_URL):
+        logger.info("Agente venta no configurado o deshabilitado.")
         return None
-    
-    logger.debug("Cargando tools del agente %s...", agent_name)
-    tools = await asyncio.wait_for(
-        client.get_tools(),
-        timeout=app_config.MCP_TIMEOUT
-    )
-    
+
+    # Tools cacheadas: se cargan una sola vez y se reutilizan en cada invocación
+    tools = await _get_cached_tools()
+
     if not tools:
         logger.warning("No se encontraron tools para el agente %s", agent_name)
         return None
-    
-    logger.debug("Tools disponibles: %s", [tool.name for tool in tools])
+
+    logger.debug("Tools disponibles (desde cache): %s", [tool.name for tool in tools])
     
     # Buscar el tool "chat" que es el principal
     chat_tool = None
@@ -262,27 +310,14 @@ async def _invoke_mcp_agent_internal(agent_name: str, message: str, session_id: 
     
     if chat_tool:
         logger.debug("Usando tool: %s", chat_tool.name)
-        # Invocar el tool "chat" con los argumentos correctos y timeout
-        # El tool "chat" del agente espera: message, session_id, context
-        if isinstance(chat_tool, StructuredTool):
-            result = await asyncio.wait_for(
-                chat_tool.ainvoke({
-                    "message": message,
-                    "session_id": session_id,
-                    "context": context or {}
-                }),
-                timeout=app_config.MCP_TIMEOUT
-            )
-        else:
-            # Fallback: intentar con dict de argumentos
-            result = await asyncio.wait_for(
-                chat_tool.ainvoke({
-                    "message": message,
-                    "session_id": session_id,
-                    "context": context or {}
-                }),
-                timeout=app_config.MCP_TIMEOUT
-            )
+        result = await asyncio.wait_for(
+            chat_tool.ainvoke({
+                "message": message,
+                "session_id": session_id,
+                "context": context or {}
+            }),
+            timeout=app_config.MCP_TIMEOUT
+        )
         text = _extract_plain_text_from_agent_result(result)
         return text if text else None
     
@@ -320,23 +355,23 @@ async def invoke_mcp_agent(agent_name: str, message: str, session_id: int, conte
             result = await _invoke_mcp_agent_internal(agent_name, message, session_id, context)
             
             if result is not None:
-                circuit_breaker.record_success()
+                await circuit_breaker.record_success()
                 if attempt > 0:
                     logger.info("Éxito después de %s intentos", attempt + 1)
                 return result
             else:
                 # Resultado None se considera fallo
                 last_error = "Respuesta None del agente"
-                circuit_breaker.record_failure()
-                
+                await circuit_breaker.record_failure()
+
         except asyncio.TimeoutError:
             last_error = f"Timeout (>{app_config.MCP_TIMEOUT}s)"
-            circuit_breaker.record_failure()
+            await circuit_breaker.record_failure()
             logger.warning("Timeout en intento %s/%s", attempt + 1, max_retries)
-            
+
         except Exception as e:
             last_error = str(e)
-            circuit_breaker.record_failure()
+            await circuit_breaker.record_failure()
             logger.warning("Error en intento %s/%s: %s", attempt + 1, max_retries, e)
         
         if attempt < max_retries - 1:

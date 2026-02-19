@@ -8,11 +8,14 @@ import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime
 
+from cachetools import TTLCache
 
-# Storage en memoria (dict simple - para MVP)
-# Protegido con asyncio.Lock para sincronización entre corutinas
-# Clave: session_id (int, unificado con n8n)
-_MEMORY_STORE: Dict[int, List[Dict]] = {}
+
+# TTLCache con límite de tamaño para evitar memory leak en producción multiempresa.
+# maxsize=10000 → máximo 10.000 sesiones activas simultáneamente (LRU eviction al superar límite)
+# ttl=7200      → sesión expira si no recibe mensajes en 2 horas
+# El TTL se renueva en cada add() al re-asignar la clave, manteniendo vivas conversaciones activas.
+_MEMORY_STORE: TTLCache = TTLCache(maxsize=10000, ttl=7200)
 _memory_lock = asyncio.Lock()
 
 
@@ -40,18 +43,16 @@ class MemoryManager:
             response: Respuesta final al usuario (ya mejorada)
         """
         async with _memory_lock:
-            if session_id not in _MEMORY_STORE:
-                _MEMORY_STORE[session_id] = []
-            
-            _MEMORY_STORE[session_id].append({
+            history = list(_MEMORY_STORE.get(session_id, []))
+            history.append({
                 "user": user_message,
                 "agent": agent_used,
                 "response": response,
                 "timestamp": datetime.now().isoformat()
             })
-            
-            # Mantener solo últimos 10 turnos
-            _MEMORY_STORE[session_id] = _MEMORY_STORE[session_id][-10:]
+            # Re-asignar (no append in-place) para renovar el TTL de la sesión en TTLCache.
+            # Así la sesión se mantiene viva mientras el usuario siga enviando mensajes.
+            _MEMORY_STORE[session_id] = history[-10:]
     
     @staticmethod
     async def get(session_id: int, limit: int = 10) -> List[Dict]:
@@ -100,8 +101,7 @@ class MemoryManager:
             session_id: ID de la sesión/usuario (int)
         """
         async with _memory_lock:
-            if session_id in _MEMORY_STORE:
-                del _MEMORY_STORE[session_id]
+            _MEMORY_STORE.pop(session_id, None)
     
     @staticmethod
     async def get_stats() -> Dict:
@@ -109,6 +109,8 @@ class MemoryManager:
         async with _memory_lock:
             return {
                 "total_sessions": len(_MEMORY_STORE),
+                "max_sessions": _MEMORY_STORE.maxsize,
+                "session_ttl_seconds": _MEMORY_STORE.ttl,
                 "sessions": {
                     sid: len(turns)
                     for sid, turns in _MEMORY_STORE.items()

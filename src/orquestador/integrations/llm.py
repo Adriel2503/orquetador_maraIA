@@ -6,8 +6,10 @@ Inicialización lazy protegida con asyncio.Lock para concurrencia segura.
 import asyncio
 from typing import Optional, Tuple
 
+import openai
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
+from pydantic import ValidationError
 
 try:
     from ..config import config as app_config
@@ -76,15 +78,39 @@ async def invoke_orquestador(system_prompt: str, message: str) -> Tuple[str, Opt
     ]
     
     # Invocar con structured output: retorna OrquestradorDecision
-    decision: OrquestradorDecision = await structured_llm.ainvoke(messages)
-    
+    try:
+        decision: OrquestradorDecision = await structured_llm.ainvoke(messages)
+    except asyncio.TimeoutError:
+        logger.error("Timeout invocando OpenAI (>%ss)", app_config.OPENAI_TIMEOUT)
+        raise RuntimeError("OpenAI no respondió a tiempo")
+    except openai.AuthenticationError as e:
+        logger.error("API key inválida o sin permisos: %s", e)
+        raise ValueError("OPENAI_API_KEY inválida o expirada")
+    except openai.RateLimitError as e:
+        logger.warning("Rate limit de OpenAI alcanzado: %s", e)
+        raise RuntimeError("Límite de OpenAI alcanzado, intenta de nuevo")
+    except openai.APIConnectionError as e:
+        logger.error("Sin conexión a OpenAI: %s", e)
+        raise RuntimeError("No se pudo conectar a OpenAI")
+    except openai.APIStatusError as e:
+        logger.error("Error HTTP de OpenAI status=%s: %s", e.status_code, e)
+        raise RuntimeError(f"OpenAI retornó error {e.status_code}")
+    except ValidationError as e:
+        logger.error("Structured output no válido: %s", e)
+        raise RuntimeError("Respuesta de OpenAI no tiene el formato esperado")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("Error inesperado invocando OpenAI: %s", type(e).__name__)
+        raise
+
     logger.info(
         "Decisión estructurada: action=%s, agent=%s",
         decision.action, decision.agent_name
     )
-    
+
     # Extraer respuesta y agente
     reply = decision.response
     agent_to_invoke = decision.agent_name if decision.action == "delegate" else None
-    
+
     return reply, agent_to_invoke

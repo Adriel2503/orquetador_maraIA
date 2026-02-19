@@ -59,8 +59,8 @@ class ChatResponse(BaseModel):
     """Response que devuelve el orquestador a n8n"""
     reply: str
     session_id: int
-    agent_used: Optional[str] = None  # "venta" | "cita" | "reserva" | null si respondió el orquestador
-    action: Optional[str] = None      # "schedule" | "info" | "clarify" | "escalate" | "none"
+    agent_used: Optional[Literal["venta", "cita", "reserva"]] = None
+    action: Optional[Literal["delegate", "respond", "timeout", "cancelled"]] = None
 
 
 class OrquestradorDecision(BaseModel):
